@@ -1,0 +1,129 @@
+services:
+  # ─── 1. PostgreSQL Database ───
+  db:
+    image: postgres:16-alpine
+    container_name: skool-db
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-skool}
+      POSTGRES_USER: ${POSTGRES_USER:-skool}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-skool_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - skool-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── 2. FastAPI Backend API ───
+  api:
+    build:
+      context: "./Skool Backend/server-fastapi"
+      dockerfile: Dockerfile
+    container_name: skool-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      PG_HOST: db
+      PGHOST: db
+      PG_PORT: 5432
+      PGPORT: 5432
+      PG_USER: ${POSTGRES_USER:-skool}
+      PGUSER: ${POSTGRES_USER:-skool}
+      PG_PASSWORD: ${POSTGRES_PASSWORD:-skool_secure_pass}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-skool_secure_pass}
+      PG_DATABASE: ${POSTGRES_DB:-skool}
+      PGDATABASE: ${POSTGRES_DB:-skool}
+      PORT: 3001
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-skool_production_secret_key_change_me_to_a_random_48_char_string}
+      JWT_SECRET: ${JWT_SECRET:-skool_production_secret_key_change_me_to_a_random_48_char_string}
+      AUTH_TOKEN_DAYS: ${AUTH_TOKEN_DAYS:-7}
+      META_CACHE_TTL_S: ${META_CACHE_TTL_S:-300}
+      ANALYTICS_CACHE_TTL_S: ${ANALYTICS_CACHE_TTL_S:-120}
+      ANALYTICS_CACHE_MAX: ${ANALYTICS_CACHE_MAX:-50}
+      CORS_ORIGINS: ""
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      skool-net:
+        aliases:
+          - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── 3. React 19 Frontend & Nginx Reverse Proxy ───
+  web:
+    build:
+      context: "./Skool Frontend/client"
+      dockerfile: Dockerfile
+    container_name: skool-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    networks:
+      skool-net:
+        aliases:
+          - frontend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── 4. Harvester & Metrics Scheduler ───
+  scheduler:
+    build:
+      context: "./skool data"
+      dockerfile: Dockerfile
+    container_name: skool-scheduler
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-skool}:${POSTGRES_PASSWORD:-skool_secure_pass}@db:5432/${POSTGRES_DB:-skool}}
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - skool-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  skool-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: skool_postgres_data

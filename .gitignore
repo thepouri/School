@@ -1,0 +1,47 @@
+# Environment & Secrets
+.env
+.env.local
+.env.production
+*.cookies
+cookies.txt
+proxy.txt
+proxies*.txt
+
+# Dependencies & Virtual Environments
+node_modules/
+venv/
+.venv/
+
+# Build & Distribution Outputs
+dist/
+build/
+*.egg-info/
+analysis_out/
+
+# Python Cache & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+*.zip
+
+# Testing & Cache Tooling
+.agents/
+.claude/
+client/_shot-*.png
+graft/
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log

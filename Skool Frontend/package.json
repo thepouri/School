@@ -1,0 +1,11 @@
+{
+  "name": "skool-front",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Skool Explorer — browse Skool communities & people (API lives in ../Skool Backend/server-fastapi)",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev --prefix client",
+    "build": "npm run build --prefix client"
+  }
+}

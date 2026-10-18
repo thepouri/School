@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+asyncpg
+pydantic-settings
+pyjwt
+bcrypt
+pytest
+httpx

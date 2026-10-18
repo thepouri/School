@@ -1,0 +1,22 @@
+[project]
+name = "skool"
+version = "0.1.0"
+description = "Skool discovery harvester"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg>=0.29",
+    "curl-cffi>=0.7",
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.1",
+    "pandas>=3.0.5",
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+# ماژول تحلیل داده:  uv pip install -e '.[analyze]'
+analyze = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+]

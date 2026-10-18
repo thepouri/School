@@ -1,0 +1,20 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# secrets — never commit tokens/cookies
+cookies.txt
+*.cookies
+
+# harvested artifacts / local outputs
+models/
+analysis_out/
+debug_discovery.json
+
+# tooling
+.claude/
+
+# paid proxies / private lists
+proxy.txt
+proxies*.txt

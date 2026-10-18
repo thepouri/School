@@ -1,0 +1,19 @@
+[Unit]
+Description=Skool Explorer API (FastAPI)
+After=network.target postgresql.service
+
+[Service]
+User=www-data
+WorkingDirectory=/opt/skool/server-fastapi
+ExecStart=/opt/skool/server-fastapi/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 3001 --workers 2
+Restart=always
+RestartSec=3
+
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/skool/server-fastapi
+
+[Install]
+WantedBy=multi-user.target

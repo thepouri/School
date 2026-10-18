@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-brand-50: #eef3ff;
+  --color-brand-100: #dce6ff;
+  --color-brand-500: #4070f4;
+  --color-brand-600: #2f5bd4;
+  --color-brand-700: #2a4fbd;
+}
+
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-color: #fafaf9; /* stone-50 */
+  color: #1c1917; /* stone-900 */
+}
+
+/* Prevent native image flashes; loaded images fade in */
+.card-img {
+  background-color: #e7e5e4;
+}
+
+/* Subtle scrollbar for horizontal filter rows */
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #d6d3d1;
+  border-radius: 9999px;
+}
+
+/* Dual-thumb price range: two overlapping native range inputs.
+   Only the thumb circles are interactive; the track area is transparent. */
+.dual-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+  z-index: 1;
+}
+/* Max thumb sits above min so it stays grabbable when they overlap. */
+.dual-range-max {
+  z-index: 3;
+}
+.dual-range-min {
+  z-index: 2;
+}
+.dual-range-min:focus,
+.dual-range-min:active {
+  z-index: 4;
+}
+.dual-range::-webkit-slider-runnable-track {
+  height: 0;
+  background: transparent;
+}
+.dual-range::-webkit-slider-thumb {
+  pointer-events: auto;
+  -webkit-appearance: none;
+  height: 18px;
+  width: 18px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid #4070f4;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  margin-top: -9px;
+}
+.dual-range::-moz-range-track {
+  height: 0;
+  background: transparent;
+}
+.dual-range::-moz-range-thumb {
+  pointer-events: auto;
+  height: 18px;
+  width: 18px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid #4070f4;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
