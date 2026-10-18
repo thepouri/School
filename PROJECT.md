@@ -1,17 +1,17 @@
 # Project: Skool Explorer Refactoring, Automation & AWS Deployment
 
 ## Architecture
-- **Backend Architecture**: FastAPI Hexagonal (Ports & Adapters) architecture located in `Skool Backend/server-fastapi`.
+- **Backend Architecture**: FastAPI Hexagonal (Ports & Adapters) architecture located in `backend/`.
   - Driving Adapters: `app/api/` (HTTP route controllers translating requests to domain models). Zero direct SQL queries or connection pool acquisitions.
   - Domain Core: `app/domain/services/` (`GroupService`, `UserService`, `UsageService`, `MetricsService`). Pure business logic.
   - Ports: `app/ports/repositories.py` (Protocol interfaces defining data access contracts).
   - Driven Adapters: `app/adapters/db/` (`PgGroupRepository`, `PgUserRepository`, `PgUsageRepository`). All SQL execution and asyncpg connection management.
   - Middleware: `app/main.py` request latency elimination via `starlette.background.BackgroundTask`.
-- **Harvester Subsystem**: Python data scraper located in `skool data/skool`.
+- **Harvester Subsystem**: Python data scraper located in `harvester/skool`.
   - 3-day stale group refresh (`--mode refresh --refresh-days 3 --no-users`) with time-series snapshots to `skool.group_metrics`.
   - Weekly deep discovery (`--mode all --no-users`) traversing 9 categories, 48 languages, and 1,354 query seeds, with zero-redundancy skipping of already-fetched groups.
   - Scheduler runner executing crontab jobs inside a containerized service.
-- **Frontend Subsystem**: React 19 + Tailwind CSS in `Skool Frontend/client`.
+- **Frontend Subsystem**: React 19 + Tailwind CSS in `frontend/`.
   - Multi-stage Docker build (`node:22-alpine` builder -> `nginx:1.27-alpine` runner).
   - Production static serving with gzip, SPA client routing (`try_files $uri $uri/ /index.html`), and immutable 1-year asset caching.
   - Relative `/api/...` reverse proxying to backend on port 3001, providing same-origin access with zero CORS overhead.
@@ -83,19 +83,19 @@
 - Headers: `Host $host`, `X-Real-IP $remote_addr`, `X-Forwarded-For $proxy_add_x_forwarded_for`, `X-Forwarded-Proto $scheme`.
 
 ## Code Layout
-- Backend Source: `Skool Backend/server-fastapi/`
+- Backend Source: `backend/`
   - `app/api/` (metrics.py, health.py, etc.)
   - `app/ports/` (repositories.py)
   - `app/adapters/db/` (group_repository.py, user_repository.py, usage_repository.py)
   - `app/domain/services/` (group_service.py, user_service.py, usage_service.py)
   - `app/main.py` (FastAPI app & middleware)
   - `Dockerfile` (Backend container)
-- Harvester Source: `skool data/skool/`
+- Harvester Source: `harvester/skool/`
   - `main.py`, `pipeline.py`, `constants.py`
   - `db/models.py`, `db/repository.py`
   - `scheduler.py` (Recurring job scheduler)
   - `Dockerfile` (Scheduler container)
-- Frontend Source: `Skool Frontend/client/`
+- Frontend Source: `frontend/`
   - `src/` (React components, API client, router)
   - `Dockerfile` (Multi-stage build)
   - `nginx.conf` (Nginx configuration)

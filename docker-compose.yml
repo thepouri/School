@@ -31,7 +31,7 @@ services:
   # ─── 2. FastAPI Backend API ───
   api:
     build:
-      context: "./Skool Backend/server-fastapi"
+      context: "./backend"
       dockerfile: Dockerfile
     container_name: skool-api
     restart: unless-stopped
@@ -78,7 +78,7 @@ services:
   # ─── 3. React 19 Frontend & Nginx Reverse Proxy ───
   web:
     build:
-      context: "./Skool Frontend/client"
+      context: "./frontend"
       dockerfile: Dockerfile
     container_name: skool-web
     restart: unless-stopped
@@ -100,7 +100,7 @@ services:
   # ─── 4. Harvester & Metrics Scheduler ───
   scheduler:
     build:
-      context: "./skool data"
+      context: "./harvester"
       dockerfile: Dockerfile
     container_name: skool-scheduler
     restart: unless-stopped

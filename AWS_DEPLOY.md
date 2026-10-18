@@ -461,10 +461,10 @@ docker stats
 
 | Component | Path | Description |
 |---|---|---|
-| **Frontend Dockerfile** | `Skool Frontend/client/Dockerfile` | Node 22 builder + Nginx 1.27 Alpine runner |
-| **Nginx Configuration** | `Skool Frontend/client/nginx.conf` | Gzip compression, immutable asset caching, `/api/` reverse proxy |
-| **Backend Dockerfile** | `Skool Backend/server-fastapi/Dockerfile` | Python 3.11-slim non-root user (UID 10001) + `/api/health` probe |
-| **Scheduler Dockerfile** | `skool data/Dockerfile` | Python 3.11-slim runner executing `python -m skool.scheduler --daemon` |
+| **Frontend Dockerfile** | `frontend/Dockerfile` | Node 22 builder + Nginx 1.27 Alpine runner |
+| **Nginx Configuration** | `frontend/nginx.conf` | Gzip compression, immutable asset caching, `/api/` reverse proxy |
+| **Backend Dockerfile** | `backend/Dockerfile` | Python 3.11-slim non-root user (UID 10001) + `/api/health` probe |
+| **Scheduler Dockerfile** | `harvester/Dockerfile` | Python 3.11-slim runner executing `python -m skool.scheduler --daemon` |
 | **Root Compose** | `docker-compose.yml` | 4-service stack (`web`, `api`, `db`, `scheduler`) |
 | **Production Env** | `.env.production` | Production environment template with credentials |
 | **Deployment Guide** | `AWS_DEPLOY.md` | Authoritative AWS launch and management manual |
