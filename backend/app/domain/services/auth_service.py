@@ -39,6 +39,7 @@ class AuthService:
                 "email": row["email"],
                 "label": row.get("label"),
                 "expires_at": expires,
+                "is_admin": bool(row.get("is_admin")),
             },
         }
 
