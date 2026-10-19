@@ -266,6 +266,17 @@ class Pipeline:
                 await repo.link_user_groups(
                     session, owner["id"], [group_id], role="owner"
                 )
+            elif detail and detail.get("owner_id") and detail.get("owner_name"):
+                # Fallback stub user so user record is always present in skool.users
+                owner_stub = {
+                    "id": detail["owner_id"],
+                    "name": detail["owner_name"],
+                    "display_name": detail.get("owner_name"),
+                }
+                await repo.upsert_user(session, owner_stub)
+                await repo.link_user_groups(
+                    session, detail["owner_id"], [group_id], role="owner"
+                )
             # Only flag when about.json actually came back; otherwise the
             # run_details pass retries and the group is not permanently burnt.
             if had_payload:

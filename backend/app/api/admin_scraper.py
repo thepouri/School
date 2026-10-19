@@ -2,7 +2,10 @@
 
 Guarded: Bearer token via require_account + admin privilege verification.
 """
-from fastapi import APIRouter, Depends, Request
+import json
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -78,3 +81,51 @@ async def update_settings(body: SettingsBody, request: Request):
         return await svc.update_settings(body.model_dump())
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@router.post("/jobs/{id}/cancel")
+async def cancel_job(id: int, request: Request):
+    deny = await _require_admin(request)
+    if deny:
+        return deny
+    svc = request.app.state.container.scraper_service
+    try:
+        return await svc.cancel_job(id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@router.get("/export")
+async def export_data(request: Request, include_metrics: bool = True):
+    deny = await _require_admin(request)
+    if deny:
+        return deny
+    svc = request.app.state.container.scraper_service
+    data = await svc.export_data(include_metrics=include_metrics)
+    content = json.dumps(data, ensure_ascii=False, default=str)
+    filename = f"skool_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/import")
+async def import_data(request: Request):
+    deny = await _require_admin(request)
+    if deny:
+        return deny
+    svc = request.app.state.container.scraper_service
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON payload in request body"})
+
+    try:
+        return await svc.import_data(payload)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"Import failed: {str(exc)}"})
+

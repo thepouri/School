@@ -8,11 +8,14 @@ import {
   Clock,
   Copy,
   Database,
+  Download,
   Pause,
   RefreshCw,
   Search,
   Settings,
+  Square,
   Terminal,
+  Upload,
   UserCheck,
   Users,
   X,
@@ -24,6 +27,9 @@ import {
   useScraperLogs,
   useScraperSettings,
   useUpdateScraperSettings,
+  useCancelJob,
+  useImportScraperData,
+  downloadScraperExport,
 } from '../../api/scraperApi.js';
 
 function formatTimestamp(isoStr) {
@@ -211,6 +217,76 @@ export default function ScraperDashboard() {
       },
     );
   };
+
+  const cancelJob = useCancelJob();
+  const importDataMutation = useImportScraperData();
+
+  // Export / Import state
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportWithMetrics, setExportWithMetrics] = useState(true);
+  const [exportError, setExportError] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [importStatus, setImportStatus] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
+
+  const handleCancelJob = (jobId) => {
+    if (!jobId) return;
+    if (!window.confirm(`Are you sure you want to stop/cancel Job #${jobId}?`)) return;
+    cancelJob.mutate(jobId, {
+      onSuccess: () => {
+        setTriggerBanner({
+          type: 'success',
+          message: `Job #${jobId} cancellation requested successfully.`,
+        });
+        if (selectedJob && selectedJob.id === jobId) {
+          setSelectedJob((prev) => ({ ...prev, status: 'CANCELLED' }));
+        }
+      },
+      onError: (err) => {
+        setTriggerBanner({
+          type: 'error',
+          message: `Failed to cancel Job #${jobId}: ${err.message || 'Unknown error'}`,
+        });
+      },
+    });
+  };
+
+  const handleExport = async () => {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      await downloadScraperExport(exportWithMetrics);
+    } catch (err) {
+      setExportError(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!selectedFile) return;
+    setIsImporting(true);
+    setImportStatus(null);
+    try {
+      const text = await selectedFile.text();
+      const json = JSON.parse(text);
+      const res = await importDataMutation.mutateAsync(json);
+      const counts = res.imported || {};
+      setImportStatus({
+        type: 'success',
+        message: `Import successful! Imported ${counts.groups || 0} groups, ${counts.users || 0} users, ${counts.user_groups || 0} user relationships, ${counts.group_metrics || 0} metric snapshots.`,
+      });
+      setSelectedFile(null);
+    } catch (err) {
+      setImportStatus({
+        type: 'error',
+        message: `Import failed: ${err.message || 'Invalid JSON format'}`,
+      });
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
 
   const handleCopyLogs = (lines) => {
     if (!lines) return;
@@ -534,6 +610,15 @@ export default function ScraperDashboard() {
                 <span className="h-2 w-2 animate-ping rounded-full bg-emerald-500" />
                 Executing
               </span>
+              <button
+                type="button"
+                disabled={cancelJob.isPending}
+                onClick={() => handleCancelJob(activeJob.id)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-red-50 px-3 py-1 text-xs font-bold text-red-700 shadow-xs hover:bg-red-100 hover:border-red-400 transition-colors disabled:opacity-50"
+              >
+                <Square size={13} className="fill-current text-red-600" />
+                {cancelJob.isPending ? 'Stopping…' : 'Stop / Cancel Job'}
+              </button>
             </div>
           </div>
         </section>
@@ -764,14 +849,28 @@ export default function ScraperDashboard() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedJob(job)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 shadow-sm transition-colors hover:border-stone-300 hover:bg-stone-50"
-                      >
-                        <Terminal size={13} />
-                        View Output
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {(job.status === 'RUNNING' || job.status === 'PENDING') && (
+                          <button
+                            type="button"
+                            disabled={cancelJob.isPending}
+                            onClick={() => handleCancelJob(job.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 shadow-xs transition-colors hover:bg-red-100 disabled:opacity-50"
+                            title="Cancel job execution"
+                          >
+                            <Square size={12} className="fill-current text-red-600" />
+                            Stop
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedJob(job)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 shadow-sm transition-colors hover:border-stone-300 hover:bg-stone-50"
+                        >
+                          <Terminal size={13} />
+                          View Output
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -781,7 +880,137 @@ export default function ScraperDashboard() {
         </div>
       </section>
 
-      {/* 5. SCHEDULE SETTINGS */}
+      {/* 5. DATA EXPORT & IMPORT */}
+      <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
+        <div className="border-b border-stone-100 pb-4">
+          <h2 className="flex items-center gap-2 text-base font-bold text-stone-900">
+            <Database size={18} className="text-brand-600" />
+            Catalog Data Export & Import
+          </h2>
+          <p className="mt-0.5 text-xs text-stone-500">
+            Export or import the complete catalog database (groups, users, relationships, and metrics history) safely and idempotently.
+          </p>
+        </div>
+
+        <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {/* Card 1: Export */}
+          <div className="flex flex-col justify-between rounded-xl border border-stone-200 bg-stone-50/50 p-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+                  <Download size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900">Export Scraped Dataset</h3>
+                  <p className="text-xs text-stone-500">Download catalog snapshot as a structured JSON file</p>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <label className="flex items-center gap-2.5 text-xs text-stone-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={exportWithMetrics}
+                    onChange={(e) => setExportWithMetrics(e.target.checked)}
+                    className="h-4 w-4 rounded border-stone-300 text-brand-600 focus:ring-brand-500"
+                  />
+                  <span>Include time-series metrics history (growth snapshots)</span>
+                </label>
+
+                {exportError && (
+                  <p className="rounded-lg bg-red-50 p-2 text-xs text-red-600 border border-red-200">
+                    {exportError}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <button
+                type="button"
+                disabled={isExporting}
+                onClick={handleExport}
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brand-600 disabled:opacity-60"
+              >
+                <Download size={14} className={isExporting ? 'animate-bounce' : ''} />
+                {isExporting ? 'Generating Export…' : 'Export Data (JSON)'}
+              </button>
+            </div>
+          </div>
+
+          {/* Card 2: Import */}
+          <div className="flex flex-col justify-between rounded-xl border border-stone-200 bg-stone-50/50 p-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-50 text-purple-600">
+                  <Upload size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900">Import Scraped Dataset</h3>
+                  <p className="text-xs text-stone-500">Restore or sync data from an exported JSON file</p>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    id="scraper-import-input"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        setSelectedFile(e.target.files[0]);
+                        setImportStatus(null);
+                      }
+                    }}
+                  />
+                  <label
+                    htmlFor="scraper-import-input"
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 shadow-xs hover:bg-stone-50"
+                  >
+                    <Upload size={13} />
+                    Choose File…
+                  </label>
+                  <span className="text-xs text-stone-500 truncate max-w-[220px]">
+                    {selectedFile ? selectedFile.name : 'No file chosen (.json)'}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-stone-400">
+                  <strong>Safe & Idempotent:</strong> Existing records will be updated without duplicates or collision errors. Missing user references are healed automatically.
+                </p>
+
+                {importStatus && (
+                  <div
+                    className={`rounded-lg p-2.5 text-xs border ${
+                      importStatus.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        : 'bg-red-50 text-red-800 border-red-200'
+                    }`}
+                  >
+                    {importStatus.message}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <button
+                type="button"
+                disabled={!selectedFile || isImporting}
+                onClick={handleImport}
+                className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50"
+              >
+                <Upload size={14} className={isImporting ? 'animate-spin' : ''} />
+                {isImporting ? 'Importing Dataset…' : 'Import Data'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 6. SCHEDULE SETTINGS */}
       <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-4">
           <div>
@@ -908,6 +1137,17 @@ export default function ScraperDashboard() {
               </div>
 
               <div className="flex items-center gap-2">
+                {(selectedJob.status === 'RUNNING' || selectedJob.status === 'PENDING') && (
+                  <button
+                    type="button"
+                    disabled={cancelJob.isPending}
+                    onClick={() => handleCancelJob(selectedJob.id)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-800 bg-red-950/80 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-900 hover:text-red-100 disabled:opacity-50"
+                  >
+                    <Square size={13} className="fill-current text-red-400" />
+                    Stop Job
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => handleCopyLogs(selectedJob.lines)}

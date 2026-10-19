@@ -16,8 +16,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -235,7 +237,7 @@ class ScraperJob(Base):
 
     __tablename__ = "scraper_jobs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     job_type: Mapped[str] = mapped_column(String(32))
     trigger_type: Mapped[str] = mapped_column(String(16), default="manual")
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
@@ -253,8 +255,10 @@ class ScraperLog(Base):
 
     __tablename__ = "scraper_logs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    job_id: Mapped[int] = mapped_column(Integer, index=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("scraper_jobs.id", ondelete="CASCADE"), index=True
+    )
     level: Mapped[str] = mapped_column(String(10), default="INFO")
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(

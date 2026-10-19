@@ -103,3 +103,34 @@ class ScraperService:
                 "is_paused": updated.get("is_paused", False),
             },
         }
+
+    async def cancel_job(self, job_id: int) -> dict:
+        """Cancel an active or queued scraper job."""
+        try:
+            clean_id = int(job_id)
+        except (TypeError, ValueError):
+            raise ValueError("job_id must be an integer")
+        if clean_id <= 0:
+            raise ValueError("job_id must be positive")
+
+        success = await self._repo.cancel_job(clean_id)
+        return {
+            "status": "cancelled" if success else "not_found_or_already_completed",
+            "job_id": clean_id,
+            "success": success,
+        }
+
+    async def export_data(self, include_metrics: bool = True) -> dict:
+        """Export all scraped data (groups, users, relationships, and time-series metrics)."""
+        return await self._repo.export_data(include_metrics=bool(include_metrics))
+
+    async def import_data(self, payload: dict) -> dict:
+        """Import scraped dataset safely and idempotently."""
+        if not isinstance(payload, dict):
+            raise ValueError("Import payload must be a JSON object")
+        counts = await self._repo.import_data(payload)
+        return {
+            "status": "success",
+            "imported": counts,
+        }
+

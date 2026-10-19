@@ -41,7 +41,7 @@ class PgScraperRepository:
                 if heartbeat.tzinfo is None:
                     heartbeat = heartbeat.replace(tzinfo=timezone.utc)
                 delta_s = (now - heartbeat).total_seconds()
-                daemon_status = "RUNNING" if delta_s <= 45.0 else "STOPPED"
+                daemon_status = "RUNNING" if delta_s <= 120.0 else "STOPPED"
                 last_hb_iso = heartbeat.isoformat()
             else:
                 daemon_status = "STOPPED"
@@ -332,3 +332,376 @@ class PgScraperRepository:
                 WHERE id = 1
                 """
             )
+
+    async def cancel_job(self, job_id: int) -> bool:
+        async with self._pool.acquire() as conn:
+            res = await conn.execute(
+                """
+                UPDATE skool.scraper_jobs
+                SET status = 'CANCELLED',
+                    finished_at = NOW(),
+                    error_message = 'Cancelled by administrator'
+                WHERE id = $1 AND status IN ('PENDING', 'RUNNING')
+                """,
+                job_id,
+            )
+            if "UPDATE 1" in res:
+                await conn.execute(
+                    """
+                    INSERT INTO skool.scraper_logs (job_id, level, message, created_at)
+                    VALUES ($1, 'WARNING', 'Job was cancelled by administrator', NOW())
+                    """,
+                    job_id,
+                )
+                return True
+            return False
+
+    async def export_data(self, include_metrics: bool = True) -> dict:
+        async with self._pool.acquire() as conn:
+            groups_rows = await conn.fetch("SELECT * FROM skool.groups ORDER BY id ASC")
+            users_rows = await conn.fetch("SELECT * FROM skool.users ORDER BY id ASC")
+            ug_rows = await conn.fetch("SELECT * FROM skool.user_groups ORDER BY user_id, group_id ASC")
+
+            groups = [record_to_dict(r) for r in groups_rows]
+            users = [record_to_dict(r) for r in users_rows]
+            user_groups = [record_to_dict(r) for r in ug_rows]
+
+            group_metrics = []
+            user_metrics = []
+            if include_metrics:
+                gm_rows = await conn.fetch("SELECT * FROM skool.group_metrics ORDER BY group_id, captured_at ASC")
+                um_rows = await conn.fetch("SELECT * FROM skool.user_metrics ORDER BY user_id, captured_at ASC")
+                group_metrics = [record_to_dict(r) for r in gm_rows]
+                user_metrics = [record_to_dict(r) for r in um_rows]
+
+            return {
+                "version": "1.0",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "counts": {
+                    "groups": len(groups),
+                    "users": len(users),
+                    "user_groups": len(user_groups),
+                    "group_metrics": len(group_metrics),
+                    "user_metrics": len(user_metrics),
+                },
+                "data": {
+                    "groups": groups,
+                    "users": users,
+                    "user_groups": user_groups,
+                    "group_metrics": group_metrics,
+                    "user_metrics": user_metrics,
+                },
+            }
+
+    async def import_data(self, payload: dict) -> dict:
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+
+        raw_groups = data.get("groups") or []
+        raw_users = data.get("users") or []
+        raw_user_groups = data.get("user_groups") or []
+        raw_group_metrics = data.get("group_metrics") or []
+        raw_user_metrics = data.get("user_metrics") or []
+
+        imported_counts = {
+            "groups": 0,
+            "users": 0,
+            "user_groups": 0,
+            "group_metrics": 0,
+            "user_metrics": 0,
+        }
+
+        def _to_dt(val: Any) -> datetime | None:
+            if val is None:
+                return None
+            if isinstance(val, datetime):
+                return val
+            if isinstance(val, str):
+                try:
+                    d = datetime.fromisoformat(val)
+                    if d.tzinfo is None:
+                        d = d.replace(tzinfo=timezone.utc)
+                    return d
+                except Exception:
+                    return None
+            return None
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Users
+                sorted_users = [u for u in raw_users if isinstance(u, dict) and u.get("id") and u.get("name")]
+                sorted_users.sort(key=lambda u: str(u["id"]))
+                if sorted_users:
+                    user_records = [
+                        (
+                            str(u["id"]),
+                            str(u["name"]),
+                            u.get("display_name"),
+                            u.get("initials"),
+                            u.get("color"),
+                            u.get("bio"),
+                            u.get("location"),
+                            u.get("timezone"),
+                            u.get("picture_url"),
+                            u.get("cover_url"),
+                            u.get("raw_badges"),
+                            u.get("links"),
+                            int(u["total_followers"]) if u.get("total_followers") is not None else None,
+                            int(u["total_following"]) if u.get("total_following") is not None else None,
+                            int(u["total_contributions"]) if u.get("total_contributions") is not None else None,
+                            int(u["owned_groups"]) if u.get("owned_groups") is not None else None,
+                            int(u["member_groups"]) if u.get("member_groups") is not None else None,
+                            bool(u.get("is_scraped", False)),
+                            _to_dt(u.get("created_at")),
+                            _to_dt(u.get("updated_at")),
+                        )
+                        for u in sorted_users
+                    ]
+                    await conn.executemany(
+                        """
+                        INSERT INTO skool.users (
+                            id, name, display_name, initials, color, bio, location, timezone,
+                            picture_url, cover_url, raw_badges, links, total_followers,
+                            total_following, total_contributions, owned_groups, member_groups,
+                            is_scraped, created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                            $16, $17, $18, COALESCE($19, NOW()), COALESCE($20, NOW())
+                        )
+                        ON CONFLICT (id) DO UPDATE SET
+                            display_name = COALESCE(EXCLUDED.display_name, skool.users.display_name),
+                            initials = COALESCE(EXCLUDED.initials, skool.users.initials),
+                            color = COALESCE(EXCLUDED.color, skool.users.color),
+                            bio = COALESCE(EXCLUDED.bio, skool.users.bio),
+                            location = COALESCE(EXCLUDED.location, skool.users.location),
+                            timezone = COALESCE(EXCLUDED.timezone, skool.users.timezone),
+                            picture_url = COALESCE(EXCLUDED.picture_url, skool.users.picture_url),
+                            cover_url = COALESCE(EXCLUDED.cover_url, skool.users.cover_url),
+                            raw_badges = COALESCE(EXCLUDED.raw_badges, skool.users.raw_badges),
+                            links = COALESCE(EXCLUDED.links, skool.users.links),
+                            total_followers = COALESCE(EXCLUDED.total_followers, skool.users.total_followers),
+                            total_following = COALESCE(EXCLUDED.total_following, skool.users.total_following),
+                            total_contributions = COALESCE(EXCLUDED.total_contributions, skool.users.total_contributions),
+                            owned_groups = COALESCE(EXCLUDED.owned_groups, skool.users.owned_groups),
+                            member_groups = COALESCE(EXCLUDED.member_groups, skool.users.member_groups),
+                            is_scraped = COALESCE(EXCLUDED.is_scraped, skool.users.is_scraped),
+                            updated_at = NOW()
+                        """,
+                        user_records,
+                    )
+                    imported_counts["users"] = len(user_records)
+
+                # 2. Groups
+                sorted_groups = [g for g in raw_groups if isinstance(g, dict) and g.get("id") and g.get("name")]
+                sorted_groups.sort(key=lambda g: str(g["id"]))
+                if sorted_groups:
+                    group_records = [
+                        (
+                            str(g["id"]),
+                            str(g["name"]),
+                            g.get("display_name"),
+                            g.get("description"),
+                            g.get("lp_description"),
+                            g.get("color"),
+                            g.get("initials"),
+                            g.get("cover_url"),
+                            g.get("logo_url"),
+                            g.get("logo_big_url"),
+                            g.get("favicon_url"),
+                            int(g["price_amount_cents"]) if g.get("price_amount_cents") is not None else None,
+                            float(g["price_usd"]) if g.get("price_usd") is not None else None,
+                            g.get("price_currency"),
+                            g.get("price_interval"),
+                            int(g["membership_model"]) if g.get("membership_model") is not None else None,
+                            int(g["privacy"]) if g.get("privacy") is not None else None,
+                            bool(g["is_public"]) if g.get("is_public") is not None else None,
+                            int(g["total_members"]) if g.get("total_members") is not None else None,
+                            int(g["total_online_members"]) if g.get("total_online_members") is not None else None,
+                            int(g["total_posts"]) if g.get("total_posts") is not None else None,
+                            int(g["total_admins"]) if g.get("total_admins") is not None else None,
+                            int(g["total_rules"]) if g.get("total_rules") is not None else None,
+                            int(g["num_courses"]) if g.get("num_courses") is not None else None,
+                            int(g["num_modules"]) if g.get("num_modules") is not None else None,
+                            int(g["afl_percent"]) if g.get("afl_percent") is not None else None,
+                            g.get("src_group"),
+                            g.get("links"),
+                            g.get("owner_id"),
+                            g.get("owner_name"),
+                            g.get("category_id"),
+                            g.get("category_slug"),
+                            g.get("language"),
+                            g.get("price_bucket"),
+                            g.get("sort_seen"),
+                            g.get("discovered_via"),
+                            bool(g.get("detail_fetched", False)),
+                            _to_dt(g.get("created_at")),
+                            _to_dt(g.get("updated_at")),
+                        )
+                        for g in sorted_groups
+                    ]
+                    await conn.executemany(
+                        """
+                        INSERT INTO skool.groups (
+                            id, name, display_name, description, lp_description, color,
+                            initials, cover_url, logo_url, logo_big_url, favicon_url,
+                            price_amount_cents, price_usd, price_currency, price_interval,
+                            membership_model, privacy, is_public, total_members,
+                            total_online_members, total_posts, total_admins, total_rules,
+                            num_courses, num_modules, afl_percent, src_group, links,
+                            owner_id, owner_name, category_id, category_slug, language,
+                            price_bucket, sort_seen, discovered_via, detail_fetched,
+                            created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                            $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+                            $29, $30, $31, $32, $33, $34, $35, $36, $37,
+                            COALESCE($38, NOW()), COALESCE($39, NOW())
+                        )
+                        ON CONFLICT (id) DO UPDATE SET
+                            display_name = COALESCE(EXCLUDED.display_name, skool.groups.display_name),
+                            description = COALESCE(EXCLUDED.description, skool.groups.description),
+                            lp_description = COALESCE(EXCLUDED.lp_description, skool.groups.lp_description),
+                            cover_url = COALESCE(EXCLUDED.cover_url, skool.groups.cover_url),
+                            logo_url = COALESCE(EXCLUDED.logo_url, skool.groups.logo_url),
+                            price_amount_cents = COALESCE(EXCLUDED.price_amount_cents, skool.groups.price_amount_cents),
+                            price_usd = COALESCE(EXCLUDED.price_usd, skool.groups.price_usd),
+                            price_currency = COALESCE(EXCLUDED.price_currency, skool.groups.price_currency),
+                            price_interval = COALESCE(EXCLUDED.price_interval, skool.groups.price_interval),
+                            membership_model = COALESCE(EXCLUDED.membership_model, skool.groups.membership_model),
+                            privacy = COALESCE(EXCLUDED.privacy, skool.groups.privacy),
+                            is_public = COALESCE(EXCLUDED.is_public, skool.groups.is_public),
+                            total_members = COALESCE(EXCLUDED.total_members, skool.groups.total_members),
+                            total_online_members = COALESCE(EXCLUDED.total_online_members, skool.groups.total_online_members),
+                            total_posts = COALESCE(EXCLUDED.total_posts, skool.groups.total_posts),
+                            total_admins = COALESCE(EXCLUDED.total_admins, skool.groups.total_admins),
+                            total_rules = COALESCE(EXCLUDED.total_rules, skool.groups.total_rules),
+                            num_courses = COALESCE(EXCLUDED.num_courses, skool.groups.num_courses),
+                            num_modules = COALESCE(EXCLUDED.num_modules, skool.groups.num_modules),
+                            afl_percent = COALESCE(EXCLUDED.afl_percent, skool.groups.afl_percent),
+                            links = COALESCE(EXCLUDED.links, skool.groups.links),
+                            owner_id = COALESCE(EXCLUDED.owner_id, skool.groups.owner_id),
+                            owner_name = COALESCE(EXCLUDED.owner_name, skool.groups.owner_name),
+                            category_id = COALESCE(skool.groups.category_id, EXCLUDED.category_id),
+                            category_slug = COALESCE(skool.groups.category_slug, EXCLUDED.category_slug),
+                            language = COALESCE(skool.groups.language, EXCLUDED.language),
+                            detail_fetched = COALESCE(EXCLUDED.detail_fetched, skool.groups.detail_fetched),
+                            updated_at = NOW()
+                        """,
+                        group_records,
+                    )
+                    imported_counts["groups"] = len(group_records)
+
+                # 3. User Groups
+                sorted_ugs = [
+                    ug for ug in raw_user_groups
+                    if isinstance(ug, dict) and ug.get("user_id") and ug.get("group_id")
+                ]
+                sorted_ugs.sort(key=lambda x: (str(x["user_id"]), str(x["group_id"])))
+                if sorted_ugs:
+                    ug_records = [
+                        (
+                            str(ug["user_id"]),
+                            str(ug["group_id"]),
+                            str(ug.get("role", "member")),
+                            _to_dt(ug.get("created_at")),
+                        )
+                        for ug in sorted_ugs
+                    ]
+                    await conn.executemany(
+                        """
+                        INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+                        VALUES ($1, $2, $3, COALESCE($4, NOW()))
+                        ON CONFLICT (user_id, group_id) DO UPDATE SET
+                            role = EXCLUDED.role
+                        """,
+                        ug_records,
+                    )
+                    imported_counts["user_groups"] = len(ug_records)
+
+                # 4. Group Metrics (idempotent / deduplicated)
+                if raw_group_metrics:
+                    gm_records = [
+                        (
+                            str(m["group_id"]),
+                            float(m["price_usd"]) if m.get("price_usd") is not None else None,
+                            int(m["total_members"]) if m.get("total_members") is not None else None,
+                            int(m["total_online_members"]) if m.get("total_online_members") is not None else None,
+                            int(m["total_posts"]) if m.get("total_posts") is not None else None,
+                            int(m["total_admins"]) if m.get("total_admins") is not None else None,
+                            int(m["total_rules"]) if m.get("total_rules") is not None else None,
+                            int(m["num_courses"]) if m.get("num_courses") is not None else None,
+                            int(m["num_modules"]) if m.get("num_modules") is not None else None,
+                            int(m["afl_percent"]) if m.get("afl_percent") is not None else None,
+                            _to_dt(m.get("captured_at")) or datetime.now(timezone.utc),
+                        )
+                        for m in raw_group_metrics
+                        if isinstance(m, dict) and m.get("group_id")
+                    ]
+                    if gm_records:
+                        await conn.executemany(
+                            """
+                            INSERT INTO skool.group_metrics (
+                                group_id, price_usd, total_members, total_online_members, total_posts,
+                                total_admins, total_rules, num_courses, num_modules, afl_percent, captured_at
+                            )
+                            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM skool.group_metrics
+                                WHERE group_id = $1 AND captured_at = $11
+                            )
+                            """,
+                            gm_records,
+                        )
+                        imported_counts["group_metrics"] = len(gm_records)
+
+                # 5. User Metrics
+                if raw_user_metrics:
+                    um_records = [
+                        (
+                            str(m["user_id"]),
+                            int(m["total_followers"]) if m.get("total_followers") is not None else None,
+                            int(m["total_following"]) if m.get("total_following") is not None else None,
+                            int(m["total_contributions"]) if m.get("total_contributions") is not None else None,
+                            int(m["owned_groups"]) if m.get("owned_groups") is not None else None,
+                            _to_dt(m.get("captured_at")) or datetime.now(timezone.utc),
+                        )
+                        for m in raw_user_metrics
+                        if isinstance(m, dict) and m.get("user_id")
+                    ]
+                    if um_records:
+                        await conn.executemany(
+                            """
+                            INSERT INTO skool.user_metrics (
+                                user_id, total_followers, total_following, total_contributions, owned_groups, captured_at
+                            )
+                            SELECT $1, $2, $3, $4, $5, $6
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM skool.user_metrics
+                                WHERE user_id = $1 AND captured_at = $6
+                            )
+                            """,
+                            um_records,
+                        )
+                        imported_counts["user_metrics"] = len(um_records)
+
+                # 6. Run bidirectional healing to guarantee full consistency
+                await conn.execute(
+                    """
+                    INSERT INTO skool.users (id, name, display_name, created_at, updated_at)
+                    SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
+                    FROM skool.groups g
+                    WHERE g.owner_id IS NOT NULL 
+                      AND g.owner_name IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
+                    ON CONFLICT (id) DO NOTHING;
+
+                    INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+                    SELECT DISTINCT g.owner_id, g.id, 'owner', NOW()
+                    FROM skool.groups g
+                    WHERE g.owner_id IS NOT NULL
+                      AND EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
+                    ON CONFLICT (user_id, group_id) DO NOTHING;
+                    """
+                )
+
+        return imported_counts
+

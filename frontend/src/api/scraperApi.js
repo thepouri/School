@@ -76,3 +76,60 @@ export function useUpdateScraperSettings() {
     },
   });
 }
+
+/**
+ * Mutation to cancel/abort an active or queued scraper job.
+ */
+export function useCancelJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId) => post(`/api/admin/scraper/jobs/${jobId}/cancel`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin-scraper-status'] });
+      qc.invalidateQueries({ queryKey: ['admin-scraper-logs'] });
+    },
+  });
+}
+
+/**
+ * Mutation to import scraped JSON dataset.
+ */
+export function useImportScraperData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload) => post('/api/admin/scraper/import', payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin-scraper-status'] });
+      qc.invalidateQueries({ queryKey: ['admin-scraper-logs'] });
+    },
+  });
+}
+
+/**
+ * Trigger download of full scraped dataset export as a JSON file.
+ */
+export async function downloadScraperExport(includeMetrics = true) {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`/api/admin/scraper/export?include_metrics=${includeMetrics}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Export failed with status ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const cd = res.headers.get('content-disposition');
+  let filename = 'skool_export.json';
+  if (cd && cd.includes('filename=')) {
+    filename = cd.split('filename=')[1].replace(/["']/g, '');
+  }
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+

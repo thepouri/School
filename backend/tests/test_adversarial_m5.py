@@ -64,14 +64,14 @@ class TestHeartbeatDeltaLogic:
         "delta_seconds,expected_status",
         [
             (0.0, "RUNNING"),         # Just now
-            (10.0, "RUNNING"),        # Well within 45s
-            (44.0, "RUNNING"),        # 1s before threshold
-            (44.9, "RUNNING"),        # 0.1s before threshold
-            (45.0, "RUNNING"),        # Exactly 45s threshold
-            (45.001, "STOPPED"),      # 1ms over threshold
-            (45.1, "STOPPED"),        # 0.1s over threshold
-            (46.0, "STOPPED"),        # 1s over threshold
-            (60.0, "STOPPED"),        # 15s over threshold
+            (10.0, "RUNNING"),        # Well within 120s
+            (119.0, "RUNNING"),       # 1s before threshold
+            (119.9, "RUNNING"),       # 0.1s before threshold
+            (120.0, "RUNNING"),       # Exactly 120s threshold
+            (120.001, "STOPPED"),     # 1ms over threshold
+            (120.1, "STOPPED"),       # 0.1s over threshold
+            (121.0, "STOPPED"),       # 1s over threshold
+            (150.0, "STOPPED"),       # 30s over threshold
             (3600.0, "STOPPED"),      # 1 hour ago
             (86400.0, "STOPPED"),     # 1 day ago
             (-5.0, "RUNNING"),        # 5s in future (minor clock skew)
@@ -362,3 +362,39 @@ class TestAdminScraperAdversarial:
 
         await service.get_logs(limit=limit_val)
         spy_repo.get_logs.assert_called_once_with(limit=expected_limit, job_id=None)
+
+    @pytest.mark.anyio
+    async def test_cancel_job_service_and_endpoint(self):
+        spy_repo = MagicMock(spec=ScraperRepository)
+        spy_repo.cancel_job = AsyncMock(return_value=True)
+        service = ScraperService(spy_repo)
+
+        res = await service.cancel_job(42)
+        assert res["status"] == "cancelled"
+        assert res["job_id"] == 42
+        spy_repo.cancel_job.assert_called_once_with(42)
+
+        # Invalid job ID validation
+        with pytest.raises(ValueError):
+            await service.cancel_job(-5)
+        with pytest.raises(ValueError):
+            await service.cancel_job("invalid")
+
+    @pytest.mark.anyio
+    async def test_export_and_import_data_service(self):
+        spy_repo = MagicMock(spec=ScraperRepository)
+        spy_repo.export_data = AsyncMock(return_value={"version": "1.0", "counts": {"groups": 5}})
+        spy_repo.import_data = AsyncMock(return_value={"groups": 5, "users": 3})
+        service = ScraperService(spy_repo)
+
+        exported = await service.export_data(include_metrics=True)
+        assert exported["version"] == "1.0"
+        spy_repo.export_data.assert_called_once_with(include_metrics=True)
+
+        imported = await service.import_data({"groups": [{"id": "g1", "name": "G1"}]})
+        assert imported["status"] == "success"
+        assert imported["imported"]["groups"] == 5
+
+        with pytest.raises(ValueError):
+            await service.import_data("not a dict")
+

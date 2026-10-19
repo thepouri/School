@@ -282,6 +282,29 @@ class HarvesterScheduler:
 
         self._db_exec(_finish())
 
+    def _is_job_cancelled(self, job_id: int) -> bool:
+        if not self.enable_db:
+            return False
+
+        async def _check() -> bool:
+            async with session_scope() as session:
+                return await repo.is_scraper_job_cancelled(session, job_id)
+
+        return bool(self._db_exec(_check()))
+
+    def cleanup_dangling_jobs(self) -> int:
+        if not self.enable_db:
+            return 0
+
+        async def _cleanup() -> int:
+            async with session_scope() as session:
+                return await repo.cleanup_dangling_running_jobs(session)
+
+        cleaned = self._db_exec(_cleanup())
+        if cleaned:
+            log.info("Cleaned up %d dangling RUNNING jobs on daemon startup.", cleaned)
+        return int(cleaned or 0)
+
     def update_heartbeat(self) -> bool:
         """Update daemon_heartbeat_at in skool.scraper_settings."""
         if not self.enable_db:
@@ -437,6 +460,12 @@ class HarvesterScheduler:
                 self._db_finish_job(db_job_id, status="SUCCESS", exit_code=0, error_message=None)
             return True
 
+        if db_job_id is not None and self._is_job_cancelled(db_job_id):
+            log.warning("Job #%s was cancelled before execution started.", db_job_id)
+            job.last_status = "CANCELLED"
+            job.last_error = "Cancelled by administrator"
+            return False
+
         try:
             process = subprocess.Popen(
                 job.command,
@@ -446,17 +475,34 @@ class HarvesterScheduler:
                 bufsize=1,
                 universal_newlines=True,
             )
+            cancelled = False
             try:
                 if process.stdout:
                     for line in process.stdout:
-                        line_clean = line.rstrip()
+                        line_clean = line.rstrip() if isinstance(line, str) else str(line).rstrip()
                         if line_clean:
                             log.info("[%s] %s", job.name, line_clean)
                             if db_job_id is not None:
                                 self._db_write_log(db_job_id, "INFO", line_clean)
-                process.wait()
+                        if db_job_id is not None and self._is_job_cancelled(db_job_id):
+                            log.warning(
+                                "Job #%s was cancelled via admin! Terminating process...",
+                                db_job_id,
+                            )
+                            cancelled = True
+                            if hasattr(process, "terminate"):
+                                process.terminate()
+                            if hasattr(process, "wait"):
+                                try:
+                                    process.wait(timeout=5)
+                                except Exception:
+                                    if hasattr(process, "kill"):
+                                        process.kill()
+                            break
+                if hasattr(process, "wait"):
+                    process.wait()
             finally:
-                if process.stdout:
+                if process.stdout and hasattr(process.stdout, "close"):
                     try:
                         process.stdout.close()
                     except Exception:
@@ -464,6 +510,18 @@ class HarvesterScheduler:
 
             duration = time.monotonic() - start_time
             job.last_duration_s = duration
+
+            if cancelled:
+                job.last_status = "CANCELLED"
+                job.last_error = "Cancelled by administrator"
+                if db_job_id is not None:
+                    self._db_finish_job(
+                        db_job_id,
+                        status="CANCELLED",
+                        exit_code=-15,
+                        error_message="Cancelled by administrator",
+                    )
+                return False
 
             if process.returncode == 0:
                 job.last_status = "SUCCESS"
@@ -549,6 +607,7 @@ class HarvesterScheduler:
             self.dry_run,
             self.enable_db,
         )
+        self.cleanup_dangling_jobs()
         for job in self.jobs:
             log.info("  * Job [%s]: '%s' -> %s", job.name, job.cron, job.description)
 

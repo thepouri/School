@@ -103,3 +103,13 @@ class ScraperRepository(Protocol):
     async def update_heartbeat(self) -> None:
         ...
 
+    async def cancel_job(self, job_id: int) -> bool:
+        ...
+
+    async def export_data(self, include_metrics: bool = True) -> dict:
+        ...
+
+    async def import_data(self, data: dict) -> dict:
+        ...
+
+

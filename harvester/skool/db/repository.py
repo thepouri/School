@@ -9,6 +9,8 @@ INSERT ... ON CONFLICT DO UPDATE:
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 import logging
 from typing import Any, Sequence
 
@@ -147,38 +149,103 @@ _USER_METRIC_FIELDS = (
 )
 
 
-def _snapshot_group_metrics(session: AsyncSession, rows: Sequence[dict[str, Any]]) -> None:
-    """Append one group_metrics row per written group (same transaction)."""
+async def _snapshot_group_metrics(
+    session: AsyncSession, rows: Sequence[dict[str, Any]]
+) -> None:
+    """Append group_metrics rows, skipping redundant identical snapshots within 24 hours."""
+    group_ids = [row["id"] for row in rows if row and row.get("id")]
+    if not group_ids:
+        return
+
+    # Check latest snapshot per group
+    stmt = (
+        select(GroupMetric)
+        .distinct(GroupMetric.group_id)
+        .where(GroupMetric.group_id.in_(group_ids))
+        .order_by(GroupMetric.group_id, GroupMetric.captured_at.desc())
+    )
+    res = await session.execute(stmt)
+    latest_map = {m.group_id: m for m in res.scalars().all()}
+
+    now = datetime.now(timezone.utc)
     snapshots = []
     for row in rows:
-        snapshot = {"group_id": row["id"]}
+        gid = row.get("id")
+        if not gid:
+            continue
+        latest = latest_map.get(gid)
+        if latest is not None:
+            lat_dt = latest.captured_at
+            if lat_dt.tzinfo is None:
+                lat_dt = lat_dt.replace(tzinfo=timezone.utc)
+            age_s = (now - lat_dt).total_seconds()
+
+            changed = (
+                row.get("total_members") != latest.total_members
+                or row.get("total_online_members") != latest.total_online_members
+                or row.get("total_posts") != latest.total_posts
+                or row.get("price_usd") != latest.price_usd
+                or row.get("total_admins") != latest.total_admins
+            )
+            # Skip if less than 24h old and key metrics didn't change
+            if not changed and age_s < 86400:
+                continue
+
+        snapshot = {"group_id": gid}
         for field in _GROUP_METRIC_FIELDS:
             value = row.get(field)
-            # Numeric column wants Decimal/None, not "" — parser already
-            # emits clean values, but stay defensive.
             snapshot[field] = value if value is not None else None
         snapshots.append(snapshot)
-    if not snapshots:
+
+    if snapshots:
+        session.add_all([GroupMetric(**s) for s in snapshots])
+
+
+async def _snapshot_user_metrics(
+    session: AsyncSession, rows: Sequence[dict[str, Any]]
+) -> None:
+    """Append user_metrics rows, skipping redundant identical snapshots within 24 hours."""
+    user_ids = [row["id"] for row in rows if row and row.get("id")]
+    if not user_ids:
         return
-    session.add_all([GroupMetric(**s) for s in snapshots])
 
+    stmt = (
+        select(UserMetric)
+        .distinct(UserMetric.user_id)
+        .where(UserMetric.user_id.in_(user_ids))
+        .order_by(UserMetric.user_id, UserMetric.captured_at.desc())
+    )
+    res = await session.execute(stmt)
+    latest_map = {m.user_id: m for m in res.scalars().all()}
 
-def _snapshot_user_metrics(session: AsyncSession, rows: Sequence[dict[str, Any]]) -> None:
-    """Append one user_metrics row per written user (same transaction).
-
-    `owned_groups` is filled by the caller when known (link_user_groups); here
-    it stays NULL — the nightly snapshot command records the authoritative
-    count.
-    """
+    now = datetime.now(timezone.utc)
     snapshots = []
     for row in rows:
-        snapshot = {"user_id": row["id"]}
+        uid = row.get("id")
+        if not uid:
+            continue
+        latest = latest_map.get(uid)
+        if latest is not None:
+            lat_dt = latest.captured_at
+            if lat_dt.tzinfo is None:
+                lat_dt = lat_dt.replace(tzinfo=timezone.utc)
+            age_s = (now - lat_dt).total_seconds()
+
+            changed = (
+                row.get("total_followers") != latest.total_followers
+                or row.get("total_following") != latest.total_following
+                or row.get("total_contributions") != latest.total_contributions
+            )
+            if not changed and age_s < 86400:
+                continue
+
+        snapshot = {"user_id": uid}
         for field in _USER_METRIC_FIELDS:
             snapshot[field] = row.get(field)
         snapshots.append(snapshot)
-    if not snapshots:
-        return
-    session.add_all([UserMetric(**s) for s in snapshots])
+
+    if snapshots:
+        session.add_all([UserMetric(**s) for s in snapshots])
 
 
 async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -> int:
@@ -189,9 +256,14 @@ async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -
     if not rows:
         return 0
 
+    # Deterministic primary key sort prevents concurrent deadlocks
+    rows.sort(key=lambda r: str(r.get("id", "")))
+
     written = 0
     group_columns = [column.key for column in Group.__table__.columns]
     for chunk in _batches(rows, columns=group_columns):
+        # Guarantee chunk ordering
+        chunk.sort(key=lambda r: str(r.get("id", "")))
         stmt = pg_insert(Group).values(chunk)
         updates = _build_set(
             Group,
@@ -202,8 +274,62 @@ async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -
         )
         updates["scraped_at"] = func.now()
         stmt = stmt.on_conflict_do_update(index_elements=[Group.id], set_=updates)
-        await session.execute(stmt)
-        _snapshot_group_metrics(session, chunk)
+
+        # Execute with deadlock retry resilience
+        for attempt in range(3):
+            try:
+                await session.execute(stmt)
+                break
+            except Exception as exc:
+                if "deadlock detected" in str(exc).lower() and attempt < 2:
+                    log.warning(
+                        "Deadlock detected during upsert_groups; retrying in %.2fs (attempt %d/3)...",
+                        0.2 * (2**attempt),
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(0.2 * (2**attempt))
+                    continue
+                raise
+
+        await _snapshot_group_metrics(session, chunk)
+
+        # Create and link stub users for any group with owner_id/owner_name
+        owner_stubs = [
+            {
+                "id": r["owner_id"],
+                "name": r["owner_name"],
+                "display_name": r.get("owner_name"),
+            }
+            for r in chunk
+            if r.get("owner_id") and r.get("owner_name")
+        ]
+        if owner_stubs:
+            owner_stubs = _dedupe(owner_stubs, "id")
+            owner_stubs.sort(key=lambda u: str(u["id"]))
+            u_stmt = (
+                pg_insert(User)
+                .values(owner_stubs)
+                .on_conflict_do_nothing(index_elements=[User.id])
+            )
+            await session.execute(u_stmt)
+
+            ug_links = [
+                {"user_id": r["owner_id"], "group_id": r["id"], "role": "owner"}
+                for r in chunk
+                if r.get("owner_id")
+            ]
+            if ug_links:
+                ug_links = _dedupe(ug_links, "user_id", "group_id")
+                ug_links.sort(key=lambda x: (str(x["user_id"]), str(x["group_id"])))
+                ug_stmt = (
+                    pg_insert(UserGroup)
+                    .values(ug_links)
+                    .on_conflict_do_nothing(
+                        index_elements=[UserGroup.user_id, UserGroup.group_id]
+                    )
+                )
+                await session.execute(ug_stmt)
+
         written += len(chunk)
     return written
 
@@ -223,7 +349,7 @@ async def upsert_user(session: AsyncSession, row: dict[str, Any]) -> None:
     updates["scraped_at"] = func.now()
     stmt = stmt.on_conflict_do_update(index_elements=[User.id], set_=updates)
     await session.execute(stmt)
-    _snapshot_user_metrics(session, [clean])
+    await _snapshot_user_metrics(session, [clean])
 
 
 async def insert_missing_users(
@@ -245,7 +371,10 @@ async def insert_missing_users(
     if not rows:
         return 0
 
+    rows.sort(key=lambda r: str(r.get("id", "")))
+
     for chunk in _batches(rows):
+        chunk.sort(key=lambda r: str(r.get("id", "")))
         stmt = (
             pg_insert(User)
             .values(chunk)
@@ -256,7 +385,7 @@ async def insert_missing_users(
         # already exist and were snapshotted by whoever wrote them before)
         inserted = result.rowcount if result.rowcount is not None else 0
         if inserted:
-            _snapshot_user_metrics(session, chunk[:inserted])
+            await _snapshot_user_metrics(session, chunk[:inserted])
     return len(rows)
 
 
@@ -514,13 +643,16 @@ async def pending_missing_owner_groups(
 
 
 async def heal_missing_owners_internally(session: AsyncSession) -> int:
-    """Tier 1: Internal zero-request owner healing.
+    """Tier 1: Bidirectional zero-request owner healing.
 
-    Links owner_id and owner_name onto groups missing owner data by checking
-    skool.user_groups WHERE role = 'owner' and joining skool.users.
-    Returns the count of healed groups.
+    1. Links owner_id and owner_name onto groups missing owner data by checking
+       skool.user_groups WHERE role = 'owner' and joining skool.users.
+    2. Inserts stub user records into skool.users and links skool.user_groups
+       for any group that has owner_id and owner_name but is missing in users.
+    Returns the total count of healed records.
     """
-    stmt = text(
+    # 1. user_groups -> groups
+    stmt1 = text(
         """
         UPDATE skool.groups g
         SET owner_id = ug.user_id,
@@ -533,8 +665,38 @@ async def heal_missing_owners_internally(session: AsyncSession) -> int:
           AND (g.owner_id IS NULL OR g.owner_name IS NULL)
         """
     )
-    result = await session.execute(stmt)
-    return int(result.rowcount or 0)
+    res1 = await session.execute(stmt1)
+    healed1 = int(res1.rowcount or 0)
+
+    # 2. groups -> users
+    stmt2 = text(
+        """
+        INSERT INTO skool.users (id, name, display_name, created_at, updated_at)
+        SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
+        FROM skool.groups g
+        WHERE g.owner_id IS NOT NULL 
+          AND g.owner_name IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
+    res2 = await session.execute(stmt2)
+    healed2 = int(res2.rowcount or 0)
+
+    # 3. groups -> user_groups
+    stmt3 = text(
+        """
+        INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+        SELECT DISTINCT g.owner_id, g.id, 'owner', NOW()
+        FROM skool.groups g
+        WHERE g.owner_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
+        ON CONFLICT (user_id, group_id) DO NOTHING
+        """
+    )
+    await session.execute(stmt3)
+
+    return healed1 + healed2
 
 
 # ────────────────── Harvester Scheduler DB Integration ──────────────────
@@ -688,3 +850,29 @@ async def finish_scraper_job(
             "error_message": error_message,
         },
     )
+
+
+async def is_scraper_job_cancelled(session: AsyncSession, job_id: int) -> bool:
+    """Check if the job has been cancelled by an administrator."""
+    stmt = text("SELECT status FROM skool.scraper_jobs WHERE id = :job_id")
+    result = await session.execute(stmt, {"job_id": job_id})
+    row = result.fetchone()
+    if not row:
+        return False
+    return str(row[0]).upper() == "CANCELLED"
+
+
+async def cleanup_dangling_running_jobs(session: AsyncSession) -> int:
+    """Mark any stale RUNNING jobs as FAILED if daemon restarted unexpectedly."""
+    stmt = text(
+        """
+        UPDATE skool.scraper_jobs
+        SET status = 'FAILED',
+            finished_at = NOW(),
+            error_message = 'Daemon restarted while job was running'
+        WHERE status = 'RUNNING'
+        """
+    )
+    res = await session.execute(stmt)
+    return int(res.rowcount or 0)
+

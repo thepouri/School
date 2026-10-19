@@ -354,20 +354,41 @@ def parse_group_detail(payload: dict[str, Any]) -> dict[str, Any] | None:
 def group_owner(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Turn the `owner` block inside about.json into a user record.
 
-    This block has almost everything the user page gives (first/last name,
-    bio, links, location) — only the counts and timezone are missing.
+    Defensively searches props top-level, currentGroup top-level,
+    and metadata for user/owner dictionaries.
     """
     props = page_props(payload)
-    for key in ("currentGroup", "group"):
-        raw = _loads(props.get(key))
-        if not isinstance(raw, dict):
-            continue
-        meta = _flat(raw.get("metadata"))
-        blob = _loads(_pick(meta, "owner", "createdByUser"))
+
+    # 1. Direct candidate blocks on pageProps
+    for key in ("owner", "groupOwner", "creator", "createdByUser", "user"):
+        blob = _loads(props.get(key))
         if isinstance(blob, dict):
             row = parse_user_record(blob)
             if row:
                 return row
+
+    # 2. Inside currentGroup / group
+    for key in ("currentGroup", "group"):
+        raw = _loads(props.get(key))
+        if not isinstance(raw, dict):
+            continue
+
+        # Top-level on raw group object
+        for o_key in ("owner", "createdByUser", "creator", "user"):
+            blob = _loads(raw.get(o_key))
+            if isinstance(blob, dict):
+                row = parse_user_record(blob)
+                if row:
+                    return row
+
+        # Inside metadata
+        meta = _flat(raw.get("metadata"))
+        blob = _loads(_pick(meta, "owner", "createdByUser", "user", "creator"))
+        if isinstance(blob, dict):
+            row = parse_user_record(blob)
+            if row:
+                return row
+
     return None
 
 

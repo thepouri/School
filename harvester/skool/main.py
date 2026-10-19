@@ -236,9 +236,13 @@ async def run(args: argparse.Namespace) -> None:
     if args.reset_db:
         await reset_db()
         log.info("Schema rebuilt from scratch")
+        await dispose_db()
+        return
     elif args.init_db:
         await init_db()
         log.info("Schema and tables ready")
+        await dispose_db()
+        return
 
     languages = _norm(args.languages)
     search_languages = (
