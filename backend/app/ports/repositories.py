@@ -79,3 +79,27 @@ class MetricsRepository(Protocol):
 
     async def user_series(self, user_id: str, from_: str | None, to: str | None) -> list[dict]:
         ...
+
+
+class ScraperRepository(Protocol):
+    async def get_status(self) -> dict:
+        ...
+
+    async def get_settings(self) -> dict:
+        ...
+
+    async def update_settings(self, settings: dict) -> dict:
+        ...
+
+    async def enqueue_job(self, job_type: str, trigger_type: str = "manual") -> int:
+        ...
+
+    async def get_logs(self, limit: int = 50, job_id: int | None = None) -> list[dict]:
+        ...
+
+    async def get_active_job(self) -> dict | None:
+        ...
+
+    async def update_heartbeat(self) -> None:
+        ...
+

@@ -211,3 +211,52 @@ class UserMetric(Base):
 
 Index("ix_group_metrics_group_time", GroupMetric.group_id, GroupMetric.captured_at)
 Index("ix_user_metrics_user_time", UserMetric.user_id, UserMetric.captured_at)
+
+
+class ScraperSettings(Base):
+    """Scraper settings and heartbeat tracking."""
+
+    __tablename__ = "scraper_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    refresh_interval_days: Mapped[int] = mapped_column(Integer, default=3)
+    discovery_interval_days: Mapped[int] = mapped_column(Integer, default=7)
+    refresh_cron: Mapped[str] = mapped_column(String(64), default="0 2 */3 * *")
+    discovery_cron: Mapped[str] = mapped_column(String(64), default="0 3 * * 0")
+    is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    daemon_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ScraperJob(Base):
+    """Manual and scheduled scraper job execution records."""
+
+    __tablename__ = "scraper_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_type: Mapped[str] = mapped_column(String(32))
+    trigger_type: Mapped[str] = mapped_column(String(16), default="manual")
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ScraperLog(Base):
+    """Streaming log output from scraper job executions."""
+
+    __tablename__ = "scraper_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(Integer, index=True)
+    level: Mapped[str] = mapped_column(String(10), default="INFO")
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

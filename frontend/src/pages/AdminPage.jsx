@@ -1,11 +1,15 @@
 import { useState } from 'react';
-import { Shield, Plus, KeyRound, Power, CalendarPlus, Copy, Check, Trash2, X } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import {
+  Shield, Plus, KeyRound, Power, CalendarPlus, Copy, Check, Trash2, X, Users, RefreshCw,
+} from 'lucide-react';
 import {
   useAdminAccounts, useCreateAccount, useExtendAccount, useSetActive, useResetPassword,
 } from '../api/authApi.js';
 import { post, buildQuery } from '../api/client.js';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { isAdmin, getAccount } from '../lib/auth.js';
+import ScraperDashboard from '../components/Admin/ScraperDashboard.jsx';
 
 function statusOf(acct) {
   if (!acct.is_active) return { text: 'Disabled', cls: 'bg-stone-100 text-stone-500' };
@@ -63,6 +67,22 @@ export default function AdminPage() {
   const [pwDraft, setPwDraft] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
+  // Tab navigation state (?tab=scraper / ?tab=accounts)
+  const [searchParams, setSearchParams] = useSearchParams();
+  const currentTab = searchParams.get('tab') === 'scraper' ? 'scraper' : 'accounts';
+
+  const setTab = (tab) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (tab === 'accounts') {
+        next.delete('tab');
+      } else {
+        next.set('tab', tab);
+      }
+      return next;
+    });
+  };
+
   if (!isAdmin()) {
     return (
       <div className="py-16 text-center">
@@ -107,17 +127,49 @@ export default function AdminPage() {
       <div className="py-8">
         <h1 className="flex items-center gap-2 text-3xl font-bold tracking-tight text-stone-900">
           <Shield size={26} className="text-brand-500" />
-          Account management
+          Admin Panel
         </h1>
         <p className="mt-1 text-[15px] text-stone-500">
-          Create customer accounts, extend subscriptions, and control access. Signed in as{' '}
+          Manage customer accounts and monitor scraper operations. Signed in as{' '}
           <span className="font-semibold text-stone-700">{getAccount()?.email}</span>.
         </p>
+
+        {/* Tab Navigation */}
+        <div className="mt-6 flex border-b border-stone-200">
+          <button
+            type="button"
+            onClick={() => setTab('accounts')}
+            className={`inline-flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-semibold transition-colors ${
+              currentTab === 'accounts'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-stone-500 hover:border-stone-300 hover:text-stone-700'
+            }`}
+          >
+            <Users size={16} />
+            Customer Accounts
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('scraper')}
+            className={`inline-flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-semibold transition-colors ${
+              currentTab === 'scraper'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-stone-500 hover:border-stone-300 hover:text-stone-700'
+            }`}
+          >
+            <RefreshCw size={16} />
+            Scraper Management
+          </button>
+        </div>
       </div>
 
-      {/* Create account */}
-      <form
-        onSubmit={onCreate}
+      {currentTab === 'scraper' && <ScraperDashboard />}
+
+      {currentTab === 'accounts' && (
+        <>
+          {/* Create account */}
+          <form
+            onSubmit={onCreate}
         className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm"
       >
         <h2 className="flex items-center gap-2 text-base font-bold text-stone-900">
@@ -315,6 +367,8 @@ export default function AdminPage() {
         <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
           {extend.error?.message || setActive.error?.message}
         </p>
+      )}
+        </>
       )}
     </div>
   );

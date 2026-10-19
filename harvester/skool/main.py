@@ -65,9 +65,23 @@ def build_parser() -> argparse.ArgumentParser:
             "members",
             "complete",
             "refresh",
+            "missing-owners",
+            "missing_owners",
             "all",
         ),
         default="all",
+    )
+    parser.add_argument(
+        "--missing-owners-batch",
+        type=int,
+        default=200,
+        help="groups per batch in missing-owners mode (default: 200)",
+    )
+    parser.add_argument(
+        "--missing-owners-max-groups",
+        type=int,
+        default=None,
+        help="cap on groups enriched in missing-owners mode (default: all)",
     )
     parser.add_argument("--init-db", action="store_true", help="create schema and tables")
     parser.add_argument(
@@ -322,6 +336,13 @@ async def run(args: argparse.Namespace) -> None:
                 max_users=args.refresh_max_users,
                 skip_users=args.no_users,
                 older_than_days=args.refresh_days,
+            )
+
+        if args.mode in ("missing-owners", "missing_owners"):
+            log.info("=== Missing owners completion (2-tier recovery) ===")
+            await pipeline.run_missing_owners(
+                batch=args.missing_owners_batch,
+                max_groups=args.missing_owners_max_groups,
             )
 
         log.info("Summary: %s", pipeline.stats.as_dict())

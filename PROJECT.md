@@ -51,6 +51,10 @@
 | M2 | Automated 3-Day Metrics Refresh & Weekly Discovery | F8, F9, F10, F11, F12 | none | DONE |
 | M3 | Turnkey Dockerization & AWS Deployment Configuration | F13, F14, F15, F16, F17, F18 | M1, M2 | DONE |
 | M4 | Full Verification & Adversarial Hardening | F19, F20 | M1, M2, M3 | DONE |
+| M5 | Scraper Admin Management & Control API (Hexagonal) | F21, F22, F23, F24 | none | DONE |
+| M6 | Harvester Scheduler DB Integration & Missing Owners | F25, F26 | M5 | DONE |
+| M7 | Scraper Dashboard UI & MetricsChart Enhancements | F27, F28 | M5 | DONE |
+| M8 | Full Verification & Non-Regression Hardening | F29 | M5, M6, M7 | IN_PROGRESS |
 
 ## Interface Contracts
 

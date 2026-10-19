@@ -22,6 +22,8 @@ CLI Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import concurrent.futures
 import logging
 import os
 import signal
@@ -33,7 +35,49 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from .db import repository as repo
+    from .db.db import session_scope
+
+    DB_AVAILABLE = True
+except Exception:
+    repo = None  # type: ignore
+    session_scope = None  # type: ignore
+    DB_AVAILABLE = False
+
 log = logging.getLogger("skool.scheduler")
+
+
+class _AsyncWorker:
+    """Dedicated background thread hosting a single persistent event loop for async DB calls."""
+
+    _instance: _AsyncWorker | None = None
+    _lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._target, daemon=True, name="scheduler-db-loop")
+        self._thread.start()
+
+    def _target(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def run(self, coro: Any) -> Any:
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    @classmethod
+    def get(cls) -> _AsyncWorker:
+        with cls._lock:
+            if cls._instance is None or not cls._instance._thread.is_alive():
+                cls._instance = _AsyncWorker()
+            return cls._instance
+
+
+def _run_coroutine(coro: Any) -> Any:
+    """Safely execute an async coroutine from synchronous code on the persistent worker loop."""
+    return _AsyncWorker.get().run(coro)
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -182,19 +226,181 @@ def build_default_jobs(
 
 
 class HarvesterScheduler:
-    """Manages scheduling and execution of recurring harvester pipelines."""
+    """Manages scheduling and execution of recurring harvester pipelines and queued jobs."""
 
     def __init__(
         self,
         jobs: list[ScheduledJob] | None = None,
         check_interval: float = 30.0,
         dry_run: bool = False,
+        enable_db: bool = True,
     ) -> None:
         self.jobs: list[ScheduledJob] = jobs or build_default_jobs()
         self.check_interval = check_interval
         self.dry_run = dry_run
+        self.enable_db = enable_db and DB_AVAILABLE
+        self.is_paused: bool = False
         self._stop_event = threading.Event()
         self._last_run_keys: dict[str, tuple[int, int, int, int, int]] = {}
+        self._lock = threading.Lock()
+
+    def _db_exec(self, coro: Any) -> Any:
+        """Execute a DB coroutine safely, returning None on failure."""
+        if not self.enable_db or not DB_AVAILABLE:
+            return None
+        try:
+            return _run_coroutine(coro)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Database operation skipped/failed: %s", exc)
+            return None
+
+    def _db_write_log(self, job_id: int, level: str, message: str) -> None:
+        if not self.enable_db:
+            return
+
+        async def _log() -> None:
+            async with session_scope() as session:
+                await repo.insert_scraper_log(session, job_id, level, message)
+
+        self._db_exec(_log())
+
+    def _db_finish_job(
+        self,
+        job_id: int,
+        status: str,
+        exit_code: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if not self.enable_db:
+            return
+
+        async def _finish() -> None:
+            async with session_scope() as session:
+                await repo.finish_scraper_job(
+                    session, job_id, status, exit_code, error_message
+                )
+
+        self._db_exec(_finish())
+
+    def update_heartbeat(self) -> bool:
+        """Update daemon_heartbeat_at in skool.scraper_settings."""
+        if not self.enable_db:
+            return False
+
+        async def _update() -> bool:
+            async with session_scope() as session:
+                await repo.update_daemon_heartbeat(session)
+            return True
+
+        res = self._db_exec(_update())
+        return bool(res)
+
+    def reload_settings(self) -> dict[str, Any] | None:
+        """Read dynamic intervals, cron expressions, and pause state from skool.scraper_settings."""
+        if not self.enable_db:
+            return None
+
+        async def _read() -> dict[str, Any] | None:
+            async with session_scope() as session:
+                return await repo.get_scraper_settings(session)
+
+        settings = self._db_exec(_read())
+        if not settings:
+            return None
+
+        # Update pause state
+        if "is_paused" in settings:
+            prev_paused = self.is_paused
+            self.is_paused = bool(settings["is_paused"])
+            if prev_paused != self.is_paused:
+                log.info("Scheduler pause state updated: is_paused=%s", self.is_paused)
+
+        # Update refresh interval and cron
+        ref_int = settings.get("refresh_interval_days")
+        refresh_job = self.get_job("refresh")
+        if refresh_job and ref_int is not None:
+            cmd = list(refresh_job.command)
+            if "--refresh-days" in cmd:
+                idx = cmd.index("--refresh-days")
+                if idx + 1 < len(cmd):
+                    cmd[idx + 1] = str(ref_int)
+            else:
+                cmd.extend(["--refresh-days", str(ref_int)])
+            refresh_job.command = cmd
+
+        ref_cron = settings.get("refresh_cron")
+        if refresh_job and ref_cron and refresh_job.cron != ref_cron:
+            log.info("Updated refresh job cron from '%s' to '%s'", refresh_job.cron, ref_cron)
+            refresh_job.cron = ref_cron
+
+        # Update discovery cron
+        disc_cron = settings.get("discovery_cron")
+        disc_job = self.get_job("discovery")
+        if disc_job and disc_cron and disc_job.cron != disc_cron:
+            log.info("Updated discovery job cron from '%s' to '%s'", disc_job.cron, disc_cron)
+            disc_job.cron = disc_cron
+
+        return settings
+
+    def build_command_for_job_type(self, job_type: str) -> list[str]:
+        """Construct execution command line for a given job type."""
+        py = sys.executable
+        mode = job_type.lower().strip()
+        if mode == "refresh":
+            refresh_job = self.get_job("refresh")
+            if refresh_job:
+                return list(refresh_job.command)
+            return [py, "-m", "skool.main", "--mode", "refresh", "--refresh-days", "3", "--no-users"]
+        elif mode == "discovery":
+            disc_job = self.get_job("discovery")
+            if disc_job:
+                return list(disc_job.command)
+            return [py, "-m", "skool.main", "--mode", "all", "--no-users"]
+        elif mode == "all":
+            return [py, "-m", "skool.main", "--mode", "all"]
+        elif mode in ("missing_owners", "missing-owners"):
+            return [py, "-m", "skool.main", "--mode", "missing-owners"]
+        elif mode == "details":
+            return [py, "-m", "skool.main", "--mode", "details"]
+        elif mode == "users":
+            return [py, "-m", "skool.main", "--mode", "users"]
+        else:
+            return [py, "-m", "skool.main", "--mode", mode.replace("_", "-")]
+
+    def poll_and_execute_queued_jobs(self) -> int:
+        """Poll queued manual jobs with status 'PENDING' from skool.scraper_jobs, claim and execute."""
+        if not self.enable_db:
+            return 0
+
+        async def _claim() -> dict[str, Any] | None:
+            async with session_scope() as session:
+                return await repo.claim_next_pending_job(session)
+
+        executed_count = 0
+        while not self._stop_event.is_set():
+            claimed = self._db_exec(_claim())
+            if not claimed:
+                break
+
+            job_id = claimed["id"]
+            job_type = claimed["job_type"]
+            trigger_type = claimed.get("trigger_type", "manual")
+            log.info("Claimed pending job #%s [%s] (trigger: %s)", job_id, job_type, trigger_type)
+
+            command = self.build_command_for_job_type(job_type)
+            queued_job = ScheduledJob(
+                name=f"{job_type}_job_{job_id}",
+                cron="* * * * *",
+                description=f"Manual execution of {job_type} (job #{job_id})",
+                command=command,
+            )
+
+            self.run_job(queued_job, db_job_id=job_id)
+            executed_count += 1
+            if self.dry_run:
+                break
+
+        return executed_count
 
     def get_job(self, name: str) -> ScheduledJob | None:
         for j in self.jobs:
@@ -208,7 +414,7 @@ class HarvesterScheduler:
     def stop(self) -> None:
         self._stop_event.set()
 
-    def run_job(self, job: ScheduledJob) -> bool:
+    def run_job(self, job: ScheduledJob, db_job_id: int | None = None) -> bool:
         job.run_count += 1
         job.last_run_time = datetime.now(timezone.utc)
         job.last_status = "RUNNING"
@@ -224,6 +430,11 @@ class HarvesterScheduler:
             job.last_status = "SUCCESS"
             job.success_count += 1
             log.info("[DRY RUN] Job [%s] simulated success in %.4fs", job.name, duration)
+            if db_job_id is not None:
+                self._db_write_log(
+                    db_job_id, "INFO", f"[DRY RUN] Job [{job.name}] simulated success in {duration:.4f}s"
+                )
+                self._db_finish_job(db_job_id, status="SUCCESS", exit_code=0, error_message=None)
             return True
 
         try:
@@ -235,12 +446,22 @@ class HarvesterScheduler:
                 bufsize=1,
                 universal_newlines=True,
             )
-            if process.stdout:
-                for line in process.stdout:
-                    line_clean = line.rstrip()
-                    if line_clean:
-                        log.info("[%s] %s", job.name, line_clean)
-            process.wait()
+            try:
+                if process.stdout:
+                    for line in process.stdout:
+                        line_clean = line.rstrip()
+                        if line_clean:
+                            log.info("[%s] %s", job.name, line_clean)
+                            if db_job_id is not None:
+                                self._db_write_log(db_job_id, "INFO", line_clean)
+                process.wait()
+            finally:
+                if process.stdout:
+                    try:
+                        process.stdout.close()
+                    except Exception:
+                        pass
+
             duration = time.monotonic() - start_time
             job.last_duration_s = duration
 
@@ -248,12 +469,21 @@ class HarvesterScheduler:
                 job.last_status = "SUCCESS"
                 job.success_count += 1
                 log.info("Job [%s] finished successfully in %.2fs (exit code 0)", job.name, duration)
+                if db_job_id is not None:
+                    self._db_finish_job(db_job_id, status="SUCCESS", exit_code=0, error_message=None)
                 return True
             else:
                 job.last_status = "FAILED"
                 job.failure_count += 1
                 job.last_error = f"Process exited with non-zero code {process.returncode}"
                 log.error("Job [%s] failed with exit code %s in %.2fs", job.name, process.returncode, duration)
+                if db_job_id is not None:
+                    self._db_finish_job(
+                        db_job_id,
+                        status="FAILED",
+                        exit_code=process.returncode,
+                        error_message=job.last_error,
+                    )
                 return False
 
         except Exception as exc:  # noqa: BLE001
@@ -263,6 +493,9 @@ class HarvesterScheduler:
             job.failure_count += 1
             job.last_error = str(exc)
             log.exception("Job [%s] crashed with exception: %s", job.name, exc)
+            if db_job_id is not None:
+                self._db_write_log(db_job_id, "ERROR", f"Crashed: {exc}")
+                self._db_finish_job(db_job_id, status="FAILED", exit_code=1, error_message=str(exc))
             return False
 
     def tick(self, now: datetime | None = None) -> list[str]:
@@ -273,20 +506,48 @@ class HarvesterScheduler:
         minute_key = (now.year, now.month, now.day, now.hour, now.minute)
         triggered: list[str] = []
 
+        # 1. Update daemon heartbeat
+        self.update_heartbeat()
+
+        # 2. Reload dynamic intervals and pause flag
+        self.reload_settings()
+
+        # 3. Poll and execute queued manual jobs
+        self.poll_and_execute_queued_jobs()
+
+        # 4. Scheduled cron jobs (if not paused)
+        if self.is_paused:
+            log.info("Scheduler is paused (is_paused=True); skipping scheduled cron triggers")
+            return triggered
+
         for job in self.jobs:
             if cron_matches(job.cron, now):
                 if self._last_run_keys.get(job.name) != minute_key:
                     self._last_run_keys[job.name] = minute_key
                     triggered.append(job.name)
                     log.info("Job [%s] triggered by cron match '%s' at %s", job.name, job.cron, now.isoformat())
-                    self.run_job(job)
+
+                    db_job_id = None
+                    if self.enable_db:
+                        async def _create_scheduled(jname: str = job.name) -> int:
+                            async with session_scope() as session:
+                                return await repo.create_scraper_job(
+                                    session,
+                                    job_type=jname,
+                                    trigger_type="scheduled",
+                                    status="RUNNING",
+                                )
+                        db_job_id = self._db_exec(_create_scheduled())
+
+                    self.run_job(job, db_job_id=db_job_id)
         return triggered
 
     def run_daemon(self, single_tick: bool = False) -> None:
         log.info(
-            "Starting Harvester Scheduler Daemon (check interval: %.1fs, dry_run: %s)",
+            "Starting Harvester Scheduler Daemon (check interval: %.1fs, dry_run: %s, enable_db: %s)",
             self.check_interval,
             self.dry_run,
+            self.enable_db,
         )
         for job in self.jobs:
             log.info("  * Job [%s]: '%s' -> %s", job.name, job.cron, job.description)
@@ -311,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--run-now",
-        choices=("refresh", "discovery", "all"),
+        choices=("refresh", "discovery", "all", "missing-owners", "missing_owners"),
         default=None,
         help="Execute specified job immediately and exit",
     )
@@ -338,6 +599,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Simulate execution without launching actual worker processes",
     )
     parser.add_argument(
+        "--no-db",
+        action="store_true",
+        default=False,
+        help="Disable database integration (heartbeat, job queue, settings reload)",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
@@ -354,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         jobs=build_default_jobs(refresh_days=args.refresh_days),
         check_interval=args.check_interval,
         dry_run=args.dry_run,
+        enable_db=not args.no_db,
     )
 
     def _handle_signal(signum: int, _frame: Any) -> None:
@@ -377,11 +645,26 @@ def main(argv: list[str] | None = None) -> int:
             ok1 = scheduler.run_job(job1) if job1 else False
             ok2 = scheduler.run_job(job2) if job2 else False
             return 0 if (ok1 and ok2) else 1
+        elif args.run_now in ("missing-owners", "missing_owners"):
+            cmd = scheduler.build_command_for_job_type("missing-owners")
+            job = ScheduledJob(
+                name="missing-owners",
+                cron="* * * * *",
+                description="Missing owners completion (2-tier recovery)",
+                command=cmd,
+            )
+            ok = scheduler.run_job(job)
+            return 0 if ok else 1
         else:
             job = scheduler.get_job(args.run_now)
             if not job:
-                log.error("Unknown job name: %s", args.run_now)
-                return 1
+                cmd = scheduler.build_command_for_job_type(args.run_now)
+                job = ScheduledJob(
+                    name=args.run_now,
+                    cron="* * * * *",
+                    description=f"Execution of {args.run_now}",
+                    command=cmd,
+                )
             ok = scheduler.run_job(job)
             return 0 if ok else 1
 

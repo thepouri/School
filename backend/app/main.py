@@ -21,15 +21,17 @@ from app.adapters.db.group_repository import PgGroupRepository
 from app.adapters.db.meta_repository import PgMetaRepository
 from app.adapters.db.metrics_repository import PgMetricsRepository
 from app.adapters.db.pool import create_pool
+from app.adapters.db.scraper_repository import PgScraperRepository
 from app.adapters.db.usage_repository import PgUsageRepository
 from app.adapters.db.user_repository import PgUserRepository
-from app.api import admin, analytics, auth, groups, health, meta, metrics, users
+from app.api import admin, admin_scraper, analytics, auth, groups, health, meta, metrics, users
 from app.core.config import settings
 from app.domain.services.analytics_service import AnalyticsService
 from app.domain.services.auth_service import AuthService
 from app.domain.services.group_service import GroupService
 from app.domain.services.meta_service import MetaService
 from app.domain.services.metrics_service import MetricsService
+from app.domain.services.scraper_service import ScraperService
 from app.domain.services.user_service import UserService
 
 logger = logging.getLogger("skool")
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
     container.admin_service = AdminService(accounts, usage)
     container.usage_service = UsageService(usage)
     container.health_service = HealthService(lambda: is_up(pool))
+    container.scraper_service = ScraperService(PgScraperRepository(pool))
 
     logger.info(f"[server] API listening on http://localhost:{settings.port}")
     yield
@@ -149,3 +152,5 @@ app.include_router(analytics.router)
 app.include_router(metrics.router)
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(admin_scraper.router)
+

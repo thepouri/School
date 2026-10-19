@@ -7,7 +7,7 @@ import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ..db import repository as repo
 from ..scheduler import (
@@ -308,6 +308,140 @@ class TestDiscoverySkippingAndRefresh(unittest.TestCase):
         self.assertEqual(pipe.stats.groups_detailed, 1)
         self.assertEqual(len(upsert_called), 1)
         self.assertEqual(upsert_called[0]["id"], "g123")
+
+
+class TestSchedulerDbIntegration(unittest.TestCase):
+    """Unit tests for scheduler PostgreSQL DB integration."""
+
+    def test_heartbeat_update_invokes_repo(self) -> None:
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            async def _noop(*args, **kwargs):
+                return None
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            async def _mock_hb(session):
+                return None
+            mock_repo.update_daemon_heartbeat = _mock_hb
+
+            ok = scheduler.update_heartbeat()
+            self.assertTrue(ok)
+
+    def test_reload_settings_updates_dynamic_intervals_and_cron(self) -> None:
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            async def _noop(*args, **kwargs):
+                return None
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            async def _mock_settings(session):
+                return {
+                    "refresh_interval_days": 5,
+                    "discovery_interval_days": 14,
+                    "refresh_cron": "0 4 */5 * *",
+                    "discovery_cron": "0 5 * * 1",
+                    "is_paused": True,
+                }
+            mock_repo.get_scraper_settings = _mock_settings
+
+            settings = scheduler.reload_settings()
+            self.assertIsNotNone(settings)
+            self.assertTrue(scheduler.is_paused)
+
+            ref_job = scheduler.get_job("refresh")
+            self.assertIsNotNone(ref_job)
+            self.assertEqual(ref_job.cron, "0 4 */5 * *")
+            self.assertIn("--refresh-days", ref_job.command)
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "5")
+
+            disc_job = scheduler.get_job("discovery")
+            self.assertIsNotNone(disc_job)
+            self.assertEqual(disc_job.cron, "0 5 * * 1")
+
+    def test_tick_respects_is_paused(self) -> None:
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=False)
+        scheduler.is_paused = True
+
+        # Even with matching cron timestamp, tick must skip execution when paused
+        matching_dt = datetime(2026, 10, 18, 3, 0, tzinfo=timezone.utc)
+        triggered = scheduler.tick(matching_dt)
+        self.assertEqual(triggered, [])
+
+    def test_poll_and_execute_queued_jobs(self) -> None:
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            async def _noop(*args, **kwargs):
+                return None
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            # Return 1 pending job then None
+            mock_repo.claim_next_pending_job = AsyncMock(
+                side_effect=[
+                    {"id": 101, "job_type": "missing-owners", "trigger_type": "manual"},
+                    None,
+                ]
+            )
+            mock_repo.insert_scraper_log = AsyncMock(return_value=None)
+            mock_repo.finish_scraper_job = AsyncMock(return_value=None)
+
+            count = scheduler.poll_and_execute_queued_jobs()
+            self.assertEqual(count, 1)
+            mock_repo.finish_scraper_job.assert_called_once()
+            call_kwargs = mock_repo.finish_scraper_job.call_args[1] or {}
+            call_args = mock_repo.finish_scraper_job.call_args[0]
+            # Verify job ID and status
+            self.assertIn(101, list(call_args) + list(call_kwargs.values()))
+
+    def test_build_command_for_job_type_modes(self) -> None:
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=False)
+        cmd_ref = scheduler.build_command_for_job_type("refresh")
+        self.assertIn("--mode", cmd_ref)
+        self.assertIn("refresh", cmd_ref)
+
+        cmd_disc = scheduler.build_command_for_job_type("discovery")
+        self.assertIn("--mode", cmd_disc)
+        self.assertIn("all", cmd_disc)
+
+        cmd_mo = scheduler.build_command_for_job_type("missing_owners")
+        self.assertIn("--mode", cmd_mo)
+        self.assertIn("missing-owners", cmd_mo)
+
+        cmd_all = scheduler.build_command_for_job_type("all")
+        self.assertIn("--mode", cmd_all)
+        self.assertIn("all", cmd_all)
+
+    def test_cli_run_now_missing_owners_dry_run(self) -> None:
+        code1 = scheduler_main(["--run-now", "missing-owners", "--dry-run", "--no-db"])
+        self.assertEqual(code1, 0)
+
+        code2 = scheduler_main(["--run-now", "missing_owners", "--dry-run", "--no-db"])
+        self.assertEqual(code2, 0)
+
+    def test_defensive_behavior_when_db_fails(self) -> None:
+        """Verify scheduler never crashes when DB raises network/connection exceptions."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            async def _raise(*args, **kwargs):
+                raise ConnectionError("PostgreSQL unreachable")
+            mock_scope.side_effect = _raise
+
+            # None of these should raise an uncaught exception
+            hb_ok = scheduler.update_heartbeat()
+            self.assertFalse(hb_ok)
+
+            settings = scheduler.reload_settings()
+            self.assertIsNone(settings)
+
+            jobs_polled = scheduler.poll_and_execute_queued_jobs()
+            self.assertEqual(jobs_polled, 0)
+
+            # tick should safely complete
+            triggered = scheduler.tick(datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc))
+            self.assertIsInstance(triggered, list)
 
 
 if __name__ == "__main__":

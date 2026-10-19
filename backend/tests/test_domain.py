@@ -8,6 +8,8 @@ from app.domain.services.group_service import GroupService
 from app.domain.services.user_service import UserService
 from app.domain.services.usage_service import UsageService
 from app.domain.services.health_service import HealthService
+from app.domain.services.scraper_service import ScraperService
+
 
 
 class TestParsing:
@@ -139,4 +141,155 @@ class TestDomainServices:
             raise ConnectionRefusedError("DB unavailable")
         service = HealthService(mock_failing_is_up)
         assert await service.check_db() is False
+
+
+class MockScraperRepo:
+    def __init__(self):
+        self.enqueued = []
+        self.settings = {
+            "refresh_interval_days": 3,
+            "discovery_interval_days": 7,
+            "is_paused": False,
+        }
+        self.logs_requested = []
+
+    async def get_status(self) -> dict:
+        return {
+            "daemon": {"status": "RUNNING", "last_heartbeat": "2026-10-18T12:00:00Z", "is_paused": False},
+            "schedules": {
+                "refresh": {"interval_days": 3, "cron": "0 2 */3 * *", "last_run": None, "next_run": "2026-10-21T12:00:00Z"},
+                "discovery": {"interval_days": 7, "cron": "0 3 * * 0", "last_run": None, "next_run": "2026-10-25T12:00:00Z"},
+            },
+            "stats": {"total_groups": 100, "pending_details": 5, "pending_owners": 2},
+            "active_job": None,
+        }
+
+    async def get_settings(self) -> dict:
+        return dict(self.settings)
+
+    async def update_settings(self, settings_data: dict) -> dict:
+        self.settings.update(settings_data)
+        return dict(self.settings)
+
+    async def enqueue_job(self, job_type: str, trigger_type: str = "manual") -> int:
+        job_id = len(self.enqueued) + 1
+        self.enqueued.append((job_id, job_type, trigger_type))
+        return job_id
+
+    async def get_logs(self, limit: int = 50, job_id: int | None = None) -> list[dict]:
+        self.logs_requested.append((limit, job_id))
+        return [{"id": 1, "job_id": 1, "job_type": "refresh", "status": "SUCCESS", "lines": []}]
+
+    async def get_active_job(self) -> dict | None:
+        return None
+
+    async def update_heartbeat(self) -> None:
+        pass
+
+
+class TestScraperDomainService:
+    @pytest.mark.anyio
+    async def test_get_status(self):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+        status = await service.get_status()
+        assert status["daemon"]["status"] == "RUNNING"
+        assert status["stats"]["total_groups"] == 100
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", ["refresh", "discovery", "all", "missing_owners"])
+    async def test_trigger_job_valid_modes(self, mode):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+        res = await service.trigger_job(mode)
+        assert res["status"] == "queued"
+        assert res["mode"] == mode
+        assert res["job_id"] == 1
+        assert repo.enqueued[0] == (1, mode, "manual")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("bad_mode", ["invalid", "", "REFRESH_ALL", None, 123, []])
+    async def test_trigger_job_invalid_modes(self, bad_mode):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+        with pytest.raises(ValueError):
+            await service.trigger_job(bad_mode)
+
+    @pytest.mark.anyio
+    async def test_get_logs_clamping(self):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+
+        # Normal limit
+        res = await service.get_logs(limit=25, job_id=5)
+        assert len(res["items"]) == 1
+        assert repo.logs_requested[-1] == (25, 5)
+
+        # Clamped below 1
+        await service.get_logs(limit=-10)
+        assert repo.logs_requested[-1][0] == 1
+
+        # Clamped above 200
+        await service.get_logs(limit=500)
+        assert repo.logs_requested[-1][0] == 200
+
+        # Invalid type fallback
+        await service.get_logs(limit="invalid")
+        assert repo.logs_requested[-1][0] == 50
+
+        # Non-positive job_id returns empty without querying repo
+        curr_len = len(repo.logs_requested)
+        res_zero = await service.get_logs(job_id=0)
+        assert res_zero["items"] == []
+        assert len(repo.logs_requested) == curr_len
+
+        res_neg = await service.get_logs(job_id=-5)
+        assert res_neg["items"] == []
+        assert len(repo.logs_requested) == curr_len
+
+        # Out-of-range bigint job_id returns empty without querying repo
+        res_overflow = await service.get_logs(job_id=9_223_372_036_854_775_808)
+        assert res_overflow["items"] == []
+        assert len(repo.logs_requested) == curr_len
+
+    @pytest.mark.anyio
+    async def test_get_and_update_settings(self):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+
+        settings = await service.get_settings()
+        assert settings["refresh_interval_days"] == 3
+        assert settings["discovery_interval_days"] == 7
+        assert settings["is_paused"] is False
+
+        updated = await service.update_settings({
+            "refresh_interval_days": 5,
+            "discovery_interval_days": 14,
+            "is_paused": True,
+        })
+        assert updated["status"] == "updated"
+        assert updated["settings"]["refresh_interval_days"] == 5
+        assert updated["settings"]["discovery_interval_days"] == 14
+        assert updated["settings"]["is_paused"] is True
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("invalid_settings", [
+        {"refresh_interval_days": 0},
+        {"refresh_interval_days": -1},
+        {"refresh_interval_days": "abc"},
+        {"refresh_interval_days": 3651},
+        {"refresh_interval_days": 1000000},
+        {"discovery_interval_days": 0},
+        {"discovery_interval_days": -5},
+        {"discovery_interval_days": "xyz"},
+        {"discovery_interval_days": 3651},
+        {"discovery_interval_days": 500000},
+        "not_a_dict",
+    ])
+    async def test_update_settings_validation(self, invalid_settings):
+        repo = MockScraperRepo()
+        service = ScraperService(repo)
+        with pytest.raises(ValueError):
+            await service.update_settings(invalid_settings)
+
 

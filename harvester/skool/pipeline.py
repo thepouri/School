@@ -263,7 +263,9 @@ class Pipeline:
                 )
             if owner:
                 await repo.upsert_user(session, owner)
-                await repo.link_user_groups(session, owner["id"], [group_id])
+                await repo.link_user_groups(
+                    session, owner["id"], [group_id], role="owner"
+                )
             # Only flag when about.json actually came back; otherwise the
             # run_details pass retries and the group is not permanently burnt.
             if had_payload:
@@ -826,3 +828,61 @@ class Pipeline:
                 break
         log.info("Complete-users pass done: %s users processed", processed)
         return processed
+
+    async def run_missing_owners(
+        self, batch: int = 200, max_groups: int | None = None
+    ) -> dict[str, int]:
+        """Execute 2-tier recovery for groups with missing owners.
+
+        Tier 1: Internal zero-request healing via skool.user_groups WHERE role = 'owner'.
+        Tier 2: Targeted about.json fetch for groups still missing owners.
+        """
+        log.info("=== Missing owners recovery: Tier 1 internal healing ===")
+        async with session_scope() as session:
+            healed_internal = await repo.heal_missing_owners_internally(session)
+        log.info(
+            "Tier 1 complete: %d groups healed internally via user_groups",
+            healed_internal,
+        )
+
+        log.info("=== Missing owners recovery: Tier 2 targeted about.json fetch ===")
+        processed_external = 0
+        while True:
+            async with session_scope() as session:
+                pending = await repo.pending_missing_owner_groups(session, limit=batch)
+            if not pending:
+                break
+            pending = [
+                item for item in pending if item[0] not in self._seen_detail_groups
+            ]
+            if not pending:
+                break
+            if max_groups is not None:
+                pending = pending[: max(0, max_groups - processed_external)]
+                if not pending:
+                    break
+            # force=True re-fetches details even though detail_fetched=True
+            await self.enrich_groups(pending, None, force=True)
+            processed_external += len(pending)
+            if max_groups is not None and processed_external >= max_groups:
+                break
+
+        if processed_external > 0:
+            async with session_scope() as session:
+                extra_healed = await repo.heal_missing_owners_internally(session)
+                if extra_healed:
+                    healed_internal += extra_healed
+                    log.info(
+                        "Post-enrichment internal healing linked %d additional groups",
+                        extra_healed,
+                    )
+
+        log.info(
+            "Missing owners pipeline finished: %d healed internally, %d re-fetched via network",
+            healed_internal,
+            processed_external,
+        )
+        return {
+            "healed_internal": healed_internal,
+            "processed_external": processed_external,
+        }

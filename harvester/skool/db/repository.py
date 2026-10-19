@@ -12,11 +12,20 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Group, GroupMetric, User, UserGroup, UserMetric
+from .models import (
+    Group,
+    GroupMetric,
+    ScraperJob,
+    ScraperLog,
+    ScraperSettings,
+    User,
+    UserGroup,
+    UserMetric,
+)
 
 log = logging.getLogger(__name__)
 
@@ -483,3 +492,199 @@ async def counts(session: AsyncSession) -> dict[str, int]:
         "users": await _count(User),
         "user_groups": await _count(UserGroup),
     }
+
+
+# ────────────────── Missing Owners Completion ──────────────────
+
+
+async def pending_missing_owner_groups(
+    session: AsyncSession, limit: int = 500
+) -> list[tuple[str, str]]:
+    """Groups where detail_fetched = True and (owner_id IS NULL or owner_name IS NULL)."""
+    stmt = (
+        select(Group.id, Group.name)
+        .where(Group.detail_fetched.is_(True))
+        .where((Group.owner_id.is_(None)) | (Group.owner_name.is_(None)))
+        .where(Group.name.is_not(None))
+        .order_by(Group.scraped_at.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [(row[0], row[1]) for row in result.all()]
+
+
+async def heal_missing_owners_internally(session: AsyncSession) -> int:
+    """Tier 1: Internal zero-request owner healing.
+
+    Links owner_id and owner_name onto groups missing owner data by checking
+    skool.user_groups WHERE role = 'owner' and joining skool.users.
+    Returns the count of healed groups.
+    """
+    stmt = text(
+        """
+        UPDATE skool.groups g
+        SET owner_id = ug.user_id,
+            owner_name = u.name,
+            updated_at = NOW()
+        FROM skool.user_groups ug
+        JOIN skool.users u ON u.id = ug.user_id
+        WHERE ug.group_id = g.id
+          AND ug.role = 'owner'
+          AND (g.owner_id IS NULL OR g.owner_name IS NULL)
+        """
+    )
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
+# ────────────────── Harvester Scheduler DB Integration ──────────────────
+
+
+async def update_daemon_heartbeat(session: AsyncSession) -> None:
+    """Update daemon_heartbeat_at in skool.scraper_settings on each daemon tick."""
+    stmt = text(
+        """
+        INSERT INTO skool.scraper_settings (id, daemon_heartbeat_at, updated_at)
+        VALUES (1, NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET daemon_heartbeat_at = NOW()
+        """
+    )
+    await session.execute(stmt)
+
+
+async def get_scraper_settings(session: AsyncSession) -> dict[str, Any] | None:
+    """Read dynamic intervals, cron expressions, and pause state from skool.scraper_settings."""
+    stmt = select(
+        ScraperSettings.refresh_interval_days,
+        ScraperSettings.discovery_interval_days,
+        ScraperSettings.refresh_cron,
+        ScraperSettings.discovery_cron,
+        ScraperSettings.is_paused,
+    ).where(ScraperSettings.id == 1)
+    result = await session.execute(stmt)
+    row = result.one_or_none()
+    if not row:
+        return None
+    return {
+        "refresh_interval_days": int(row[0]),
+        "discovery_interval_days": int(row[1]),
+        "refresh_cron": str(row[2]),
+        "discovery_cron": str(row[3]),
+        "is_paused": bool(row[4]),
+    }
+
+
+async def claim_next_pending_job(session: AsyncSession) -> dict[str, Any] | None:
+    """Atomically claim the next queued PENDING manual job using FOR UPDATE SKIP LOCKED."""
+    stmt = text(
+        """
+        SELECT id, job_type, trigger_type
+        FROM skool.scraper_jobs
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        """
+    )
+    result = await session.execute(stmt)
+    row = result.fetchone()
+    if not row:
+        return None
+    job_id, job_type, trigger_type = row[0], row[1], row[2]
+
+    update_stmt = text(
+        """
+        UPDATE skool.scraper_jobs
+        SET status = 'RUNNING', started_at = NOW()
+        WHERE id = :job_id
+        """
+    )
+    await session.execute(update_stmt, {"job_id": job_id})
+    return {
+        "id": int(job_id),
+        "job_type": str(job_type),
+        "trigger_type": str(trigger_type),
+    }
+
+
+async def create_scraper_job(
+    session: AsyncSession,
+    job_type: str,
+    trigger_type: str = "scheduled",
+    status: str = "RUNNING",
+) -> int:
+    """Create a new job entry in skool.scraper_jobs (e.g. for scheduled runs)."""
+    stmt = text(
+        """
+        INSERT INTO skool.scraper_jobs (job_type, trigger_type, status, started_at, created_at)
+        VALUES (:job_type, :trigger_type, :status, NOW(), NOW())
+        RETURNING id
+        """
+    )
+    result = await session.execute(
+        stmt, {"job_type": job_type, "trigger_type": trigger_type, "status": status}
+    )
+    row = result.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def insert_scraper_log(
+    session: AsyncSession, job_id: int, level: str, message: str
+) -> None:
+    """Stream an execution output log line into skool.scraper_logs."""
+    stmt = text(
+        """
+        INSERT INTO skool.scraper_logs (job_id, level, message, created_at)
+        VALUES (:job_id, :level, :message, NOW())
+        """
+    )
+    await session.execute(
+        stmt, {"job_id": job_id, "level": level[:10], "message": message}
+    )
+
+
+async def insert_scraper_logs_batch(
+    session: AsyncSession, logs: Sequence[tuple[int, str, str]]
+) -> None:
+    """Batch-insert execution output log lines into skool.scraper_logs."""
+    if not logs:
+        return
+    for jid, lvl, msg in logs:
+        stmt = text(
+            """
+            INSERT INTO skool.scraper_logs (job_id, level, message, created_at)
+            VALUES (:job_id, :level, :message, NOW())
+            """
+        )
+        await session.execute(
+            stmt, {"job_id": jid, "level": lvl[:10], "message": msg}
+        )
+
+
+async def finish_scraper_job(
+    session: AsyncSession,
+    job_id: int,
+    status: str,
+    exit_code: int | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Update completion state of a scraper job in skool.scraper_jobs."""
+    stmt = text(
+        """
+        UPDATE skool.scraper_jobs
+        SET status = :status,
+            finished_at = NOW(),
+            exit_code = :exit_code,
+            error_message = :error_message
+        WHERE id = :job_id
+        """
+    )
+    await session.execute(
+        stmt,
+        {
+            "job_id": job_id,
+            "status": status,
+            "exit_code": exit_code,
+            "error_message": error_message,
+        },
+    )

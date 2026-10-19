@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ..scheduler import (
     HarvesterScheduler,
@@ -285,10 +285,325 @@ class TestSchedulerCLIEmpirical(unittest.TestCase):
         proc.returncode = 0
         mock_popen.return_value = proc
 
-        # Non-dry-run where child succeeds -> main must return 0
         code = scheduler_main(["--run-now", "discovery"])
         self.assertEqual(code, 0)
 
 
+class TestSchedulerDBIntegrationAdversarial(unittest.TestCase):
+    """Empirical challenge suite for HarvesterScheduler dynamic settings, pause, and DB failure resilience."""
+
+    def test_dynamic_interval_reload_changes_timing_without_restart(self) -> None:
+        """Requirement: Modifying settings in skool.scraper_settings alters job timing without restarting process."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+
+        current_settings = {
+            "refresh_interval_days": 3,
+            "discovery_interval_days": 7,
+            "refresh_cron": "0 2 */3 * *",
+            "discovery_cron": "0 3 * * 0",
+            "is_paused": False,
+        }
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+            mock_repo.update_daemon_heartbeat = AsyncMock(return_value=None)
+            mock_repo.claim_next_pending_job = AsyncMock(return_value=None)
+            mock_repo.get_scraper_settings = AsyncMock(side_effect=lambda session: dict(current_settings))
+
+            # Phase 1: At 2026-10-01 02:00 UTC (day 1), matches default '0 2 */3 * *'
+            t1 = datetime(2026, 10, 1, 2, 0, tzinfo=timezone.utc)
+            triggered1 = scheduler.tick(t1)
+            self.assertIn("refresh", triggered1)
+            ref_job = scheduler.get_job("refresh")
+            self.assertIsNotNone(ref_job)
+            self.assertEqual(ref_job.cron, "0 2 */3 * *")
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "3")
+
+            # Phase 2: Modify settings dynamically in PostgreSQL (simulated via DB mock)
+            # Change refresh to 10 days, cron "0 8 */10 * *", and discovery to Wednesday 09:00 "0 9 * * 3"
+            current_settings["refresh_interval_days"] = 10
+            current_settings["refresh_cron"] = "0 8 */10 * *"
+            current_settings["discovery_cron"] = "0 9 * * 3"
+
+            # At 2026-10-04 02:00 UTC: under OLD cron (*/3), day 4 would have triggered!
+            # Under NEW cron (0 8 */10 * *), 02:00 UTC does NOT match.
+            t2 = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
+            triggered2 = scheduler.tick(t2)
+            self.assertNotIn("refresh", triggered2)
+            # Verify internal scheduler state has dynamically updated
+            self.assertEqual(ref_job.cron, "0 8 */10 * *")
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "10")
+
+            # At 2026-10-11 08:00 UTC (day 11 matches */10 starting at 1, hour 8) -> MUST trigger!
+            t3 = datetime(2026, 10, 11, 8, 0, tzinfo=timezone.utc)
+            triggered3 = scheduler.tick(t3)
+            self.assertIn("refresh", triggered3)
+
+            # At Wednesday 2026-10-14 09:00 UTC (weekday=2, cron_dow=3) -> discovery MUST trigger!
+            t4 = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+            triggered4 = scheduler.tick(t4)
+            self.assertIn("discovery", triggered4)
+            disc_job = scheduler.get_job("discovery")
+            self.assertIsNotNone(disc_job)
+            self.assertEqual(disc_job.cron, "0 9 * * 3")
+
+            # Phase 3: Modify settings AGAIN to daily refresh (1 day, cron "0 0 * * *")
+            current_settings["refresh_interval_days"] = 1
+            current_settings["refresh_cron"] = "0 0 * * *"
+            t5 = datetime(2026, 10, 15, 0, 0, tzinfo=timezone.utc)
+            triggered5 = scheduler.tick(t5)
+            self.assertIn("refresh", triggered5)
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "1")
+
+    def test_dynamic_reload_partial_settings_and_missing_flags_robustness(self) -> None:
+        """Verify scheduler handles partial settings payloads without corrupting command state."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            # Setting with missing refresh_cron and discovery_cron
+            mock_repo.get_scraper_settings = AsyncMock(
+                return_value={"refresh_interval_days": 6, "is_paused": False}
+            )
+            settings = scheduler.reload_settings()
+            self.assertIsNotNone(settings)
+            ref_job = scheduler.get_job("refresh")
+            self.assertIsNotNone(ref_job)
+            # Existing cron is preserved
+            self.assertEqual(ref_job.cron, "0 2 */3 * *")
+            # Refresh days updated to 6
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "6")
+
+            # If job didn't have --refresh-days originally, it is appended cleanly
+            ref_job.command = ["python", "-m", "skool.main", "--mode", "refresh"]
+            mock_repo.get_scraper_settings = AsyncMock(
+                return_value={"refresh_interval_days": 8}
+            )
+            scheduler.reload_settings()
+            self.assertIn("--refresh-days", ref_job.command)
+            idx2 = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx2 + 1], "8")
+
+    def test_pause_behavior_suppresses_cron_while_heartbeat_and_manual_queue_function(self) -> None:
+        """Requirement: is_paused = True prevents scheduled runs while heartbeat and manual queue still function."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        heartbeat_calls = []
+        claimed_jobs = [
+            {"id": 201, "job_type": "missing-owners", "trigger_type": "manual"},
+            None,
+        ]
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            async def _hb(session):
+                heartbeat_calls.append(datetime.now(timezone.utc))
+                return None
+
+            mock_repo.update_daemon_heartbeat = _hb
+            mock_repo.get_scraper_settings = AsyncMock(
+                return_value={
+                    "is_paused": True,
+                    "refresh_interval_days": 3,
+                    "refresh_cron": "* * * * *",  # would match every minute!
+                    "discovery_cron": "* * * * *",
+                }
+            )
+            mock_repo.claim_next_pending_job = AsyncMock(side_effect=claimed_jobs)
+            mock_repo.insert_scraper_log = AsyncMock(return_value=None)
+            mock_repo.finish_scraper_job = AsyncMock(return_value=None)
+
+            # Tick at any time
+            now = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
+            triggered = scheduler.tick(now)
+
+            # 1. Scheduled runs are suppressed
+            self.assertEqual(triggered, [], "Scheduled runs must NOT execute when paused")
+            self.assertTrue(scheduler.is_paused)
+
+            # 2. Heartbeat MUST still function
+            self.assertEqual(len(heartbeat_calls), 1, "Heartbeat MUST update even when scheduler is paused")
+
+            # 3. Manual queue MUST still function
+            mock_repo.claim_next_pending_job.assert_called()
+            mock_repo.finish_scraper_job.assert_called_once()
+            call_kwargs = mock_repo.finish_scraper_job.call_args[1] or {}
+            call_args = mock_repo.finish_scraper_job.call_args[0]
+            self.assertIn(201, list(call_args) + list(call_kwargs.values()))
+            self.assertIn("SUCCESS", list(call_args) + list(call_kwargs.values()))
+
+    def test_pause_and_resume_lifecycle(self) -> None:
+        """Verify scheduler transitions from paused to resumed cleanly across ticks."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+        job = ScheduledJob(name="per_minute", cron="* * * * *", description="test", command=["python"])
+        scheduler.jobs = [job]
+
+        state = {"is_paused": True}
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+            mock_repo.update_daemon_heartbeat = AsyncMock(return_value=None)
+            mock_repo.claim_next_pending_job = AsyncMock(return_value=None)
+            mock_repo.get_scraper_settings = AsyncMock(side_effect=lambda s: dict(state))
+
+            # Minute 1: Paused
+            t1 = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
+            res1 = scheduler.tick(t1)
+            self.assertEqual(res1, [])
+            self.assertTrue(scheduler.is_paused)
+
+            # Minute 2: Resumed by admin
+            state["is_paused"] = False
+            t2 = datetime(2026, 10, 18, 12, 1, tzinfo=timezone.utc)
+            res2 = scheduler.tick(t2)
+            self.assertEqual(res2, ["per_minute"])
+            self.assertFalse(scheduler.is_paused)
+
+    def test_resilience_when_postgresql_fails_or_is_unreachable(self) -> None:
+        """Requirement: Scheduler does NOT crash when PostgreSQL is unreachable or throws errors."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+
+        class BrokenScope:
+            async def __aenter__(self):
+                raise ConnectionRefusedError("PostgreSQL 5432 unreachable or crashed")
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        with patch("skool.scheduler.session_scope", side_effect=lambda *args, **kwargs: BrokenScope()):
+            # 1. Heartbeat fails gracefully without crashing
+            self.assertFalse(scheduler.update_heartbeat())
+
+            # 2. Settings reload fails gracefully without crashing
+            self.assertIsNone(scheduler.reload_settings())
+
+            # 3. Queue polling fails gracefully without crashing
+            self.assertEqual(scheduler.poll_and_execute_queued_jobs(), 0)
+
+            # 4. Tick survives complete DB failure and continues running
+            t = datetime(2026, 10, 18, 3, 0, tzinfo=timezone.utc)  # Sunday 03:00
+            triggered = scheduler.tick(t)
+            # Scheduled job (discovery) still executes in dry-run even with DB logging failing!
+            self.assertIn("discovery", triggered)
+
+    def test_resilience_intermittent_db_disconnect_and_recovery(self) -> None:
+        """Verify scheduler survives intermittent DB dropouts and recovers immediately upon reconnect."""
+        scheduler = HarvesterScheduler(dry_run=True, enable_db=True)
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        fail_mode = True
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            def _scope_factory(*args, **kwargs):
+                if fail_mode:
+                    raise OSError("Network partition to database host")
+                mock_ctx = MagicMock()
+                mock_ctx.__aenter__ = _noop
+                mock_ctx.__aexit__ = _noop
+                return mock_ctx
+
+            mock_scope.side_effect = _scope_factory
+            mock_repo.update_daemon_heartbeat = AsyncMock(return_value=None)
+            mock_repo.get_scraper_settings = AsyncMock(
+                return_value={"refresh_interval_days": 9, "is_paused": False}
+            )
+            mock_repo.claim_next_pending_job = AsyncMock(return_value=None)
+
+            # Step 1: Outage tick
+            fail_mode = True
+            t1 = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
+            scheduler.tick(t1)  # must not crash!
+
+            # Step 2: Database recovers
+            fail_mode = False
+            t2 = datetime(2026, 10, 18, 12, 1, tzinfo=timezone.utc)
+            scheduler.tick(t2)
+            ref_job = scheduler.get_job("refresh")
+            self.assertIsNotNone(ref_job)
+            idx = ref_job.command.index("--refresh-days")
+            self.assertEqual(ref_job.command[idx + 1], "9", "Should have recovered and reloaded settings")
+
+    def test_manual_job_real_subprocess_streaming_unicode_and_exit_code(self) -> None:
+        """Verify manual job runner with real subprocess streams unicode lines and tracks non-zero exits."""
+        scheduler = HarvesterScheduler(dry_run=False, enable_db=True)
+
+        # Real script that prints unicode and exits with code 33
+        script = (
+            "import sys; "
+            "print('Starting processing'); "
+            "print('Unicode line: alpha & beta'); "
+            "print('Complete'); "
+            "sys.exit(33)"
+        )
+        cmd = [sys.executable, "-c", script]
+
+        logs_written = []
+        finish_records = []
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch("skool.scheduler.repo") as mock_repo, patch("skool.scheduler.session_scope") as mock_scope:
+            mock_scope.return_value.__aenter__ = _noop
+            mock_scope.return_value.__aexit__ = _noop
+
+            async def _mock_log(session, job_id, level, msg):
+                logs_written.append((job_id, level, msg))
+
+            async def _mock_finish(session, job_id, status, exit_code, error_msg):
+                finish_records.append((job_id, status, exit_code, error_msg))
+
+            mock_repo.insert_scraper_log = _mock_log
+            mock_repo.finish_scraper_job = _mock_finish
+
+            test_job = ScheduledJob(
+                name="unicode_exit_test",
+                cron="* * * * *",
+                description="Test unicode streaming and exit code",
+                command=cmd,
+            )
+
+            success = scheduler.run_job(test_job, db_job_id=888)
+            self.assertFalse(success)
+            self.assertEqual(test_job.last_status, "FAILED")
+
+            # Verify log lines streamed
+            msg_texts = [msg for (_, _, msg) in logs_written]
+            self.assertTrue(any("Starting processing" in m for m in msg_texts))
+            self.assertTrue(any("Unicode line" in m for m in msg_texts))
+            self.assertTrue(any("Complete" in m for m in msg_texts))
+
+            # Verify finish record
+            self.assertEqual(len(finish_records), 1)
+            job_id, status, exit_code, error_msg = finish_records[0]
+            self.assertEqual(job_id, 888)
+            self.assertEqual(status, "FAILED")
+            self.assertEqual(exit_code, 33)
+            self.assertIn("non-zero code 33", error_msg)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -18,6 +18,7 @@ class Container:
     admin_service = None
     usage_service = None
     health_service = None
+    scraper_service = None
 
     async def is_healthy(self) -> bool:
         if self.health_service:
