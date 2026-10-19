@@ -435,22 +435,25 @@ class PgScraperRepository:
                         (
                             str(u["id"]),
                             str(u["name"]),
-                            u.get("display_name"),
-                            u.get("initials"),
-                            u.get("color"),
+                            u.get("full_name") or u.get("display_name") or str(u["name"]),
+                            u.get("first_name"),
+                            u.get("last_name"),
                             u.get("bio"),
                             u.get("location"),
+                            u.get("location_source"),
                             u.get("timezone"),
-                            u.get("picture_url"),
-                            u.get("cover_url"),
-                            u.get("raw_badges"),
-                            u.get("links"),
+                            u.get("avatar_url") or u.get("picture_url"),
+                            u.get("avatar_bubble_url"),
+                            u.get("link_facebook"),
+                            u.get("link_instagram"),
+                            u.get("link_linkedin"),
+                            u.get("link_twitter"),
+                            u.get("link_website"),
+                            u.get("link_youtube"),
                             int(u["total_followers"]) if u.get("total_followers") is not None else None,
                             int(u["total_following"]) if u.get("total_following") is not None else None,
                             int(u["total_contributions"]) if u.get("total_contributions") is not None else None,
-                            int(u["owned_groups"]) if u.get("owned_groups") is not None else None,
-                            int(u["member_groups"]) if u.get("member_groups") is not None else None,
-                            bool(u.get("is_scraped", False)),
+                            bool(u.get("groups_fetched", False)),
                             _to_dt(u.get("created_at")),
                             _to_dt(u.get("updated_at")),
                         )
@@ -459,31 +462,35 @@ class PgScraperRepository:
                     await conn.executemany(
                         """
                         INSERT INTO skool.users (
-                            id, name, display_name, initials, color, bio, location, timezone,
-                            picture_url, cover_url, raw_badges, links, total_followers,
-                            total_following, total_contributions, owned_groups, member_groups,
-                            is_scraped, created_at, updated_at
+                            id, name, full_name, first_name, last_name, bio, location, location_source, timezone,
+                            avatar_url, avatar_bubble_url, link_facebook, link_instagram, link_linkedin,
+                            link_twitter, link_website, link_youtube, total_followers,
+                            total_following, total_contributions, groups_fetched, created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                            $16, $17, $18, COALESCE($19, NOW()), COALESCE($20, NOW())
+                            $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), COALESCE($23, NOW())
                         )
                         ON CONFLICT (id) DO UPDATE SET
-                            display_name = COALESCE(EXCLUDED.display_name, skool.users.display_name),
-                            initials = COALESCE(EXCLUDED.initials, skool.users.initials),
-                            color = COALESCE(EXCLUDED.color, skool.users.color),
+                            name = COALESCE(EXCLUDED.name, skool.users.name),
+                            full_name = COALESCE(EXCLUDED.full_name, skool.users.full_name),
+                            first_name = COALESCE(EXCLUDED.first_name, skool.users.first_name),
+                            last_name = COALESCE(EXCLUDED.last_name, skool.users.last_name),
                             bio = COALESCE(EXCLUDED.bio, skool.users.bio),
                             location = COALESCE(EXCLUDED.location, skool.users.location),
+                            location_source = COALESCE(EXCLUDED.location_source, skool.users.location_source),
                             timezone = COALESCE(EXCLUDED.timezone, skool.users.timezone),
-                            picture_url = COALESCE(EXCLUDED.picture_url, skool.users.picture_url),
-                            cover_url = COALESCE(EXCLUDED.cover_url, skool.users.cover_url),
-                            raw_badges = COALESCE(EXCLUDED.raw_badges, skool.users.raw_badges),
-                            links = COALESCE(EXCLUDED.links, skool.users.links),
+                            avatar_url = COALESCE(EXCLUDED.avatar_url, skool.users.avatar_url),
+                            avatar_bubble_url = COALESCE(EXCLUDED.avatar_bubble_url, skool.users.avatar_bubble_url),
+                            link_facebook = COALESCE(EXCLUDED.link_facebook, skool.users.link_facebook),
+                            link_instagram = COALESCE(EXCLUDED.link_instagram, skool.users.link_instagram),
+                            link_linkedin = COALESCE(EXCLUDED.link_linkedin, skool.users.link_linkedin),
+                            link_twitter = COALESCE(EXCLUDED.link_twitter, skool.users.link_twitter),
+                            link_website = COALESCE(EXCLUDED.link_website, skool.users.link_website),
+                            link_youtube = COALESCE(EXCLUDED.link_youtube, skool.users.link_youtube),
                             total_followers = COALESCE(EXCLUDED.total_followers, skool.users.total_followers),
                             total_following = COALESCE(EXCLUDED.total_following, skool.users.total_following),
                             total_contributions = COALESCE(EXCLUDED.total_contributions, skool.users.total_contributions),
-                            owned_groups = COALESCE(EXCLUDED.owned_groups, skool.users.owned_groups),
-                            member_groups = COALESCE(EXCLUDED.member_groups, skool.users.member_groups),
-                            is_scraped = COALESCE(EXCLUDED.is_scraped, skool.users.is_scraped),
+                            groups_fetched = COALESCE(EXCLUDED.groups_fetched, skool.users.groups_fetched),
                             updated_at = NOW()
                         """,
                         user_records,
@@ -686,7 +693,7 @@ class PgScraperRepository:
                 # 6. Run bidirectional healing to guarantee full consistency
                 await conn.execute(
                     """
-                    INSERT INTO skool.users (id, name, display_name, created_at, updated_at)
+                    INSERT INTO skool.users (id, name, full_name, created_at, updated_at)
                     SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
                     FROM skool.groups g
                     WHERE g.owner_id IS NOT NULL 

@@ -271,7 +271,7 @@ class Pipeline:
                 owner_stub = {
                     "id": detail["owner_id"],
                     "name": detail["owner_name"],
-                    "display_name": detail.get("owner_name"),
+                    "full_name": detail.get("owner_name"),
                 }
                 await repo.upsert_user(session, owner_stub)
                 await repo.link_user_groups(

@@ -298,20 +298,21 @@ async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -
             {
                 "id": r["owner_id"],
                 "name": r["owner_name"],
-                "display_name": r.get("owner_name"),
+                "full_name": r.get("owner_name"),
             }
             for r in chunk
             if r.get("owner_id") and r.get("owner_name")
         ]
         if owner_stubs:
-            owner_stubs = _dedupe(owner_stubs, "id")
+            owner_stubs = _normalize(_dedupe(_project(owner_stubs, USER_COLUMNS), "id"))
             owner_stubs.sort(key=lambda u: str(u["id"]))
-            u_stmt = (
-                pg_insert(User)
-                .values(owner_stubs)
-                .on_conflict_do_nothing(index_elements=[User.id])
-            )
-            await session.execute(u_stmt)
+            if owner_stubs:
+                u_stmt = (
+                    pg_insert(User)
+                    .values(owner_stubs)
+                    .on_conflict_do_nothing(index_elements=[User.id])
+                )
+                await session.execute(u_stmt)
 
             ug_links = [
                 {"user_id": r["owner_id"], "group_id": r["id"], "role": "owner"}
@@ -671,7 +672,7 @@ async def heal_missing_owners_internally(session: AsyncSession) -> int:
     # 2. groups -> users
     stmt2 = text(
         """
-        INSERT INTO skool.users (id, name, display_name, created_at, updated_at)
+        INSERT INTO skool.users (id, name, full_name, created_at, updated_at)
         SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
         FROM skool.groups g
         WHERE g.owner_id IS NOT NULL 
@@ -706,8 +707,10 @@ async def update_daemon_heartbeat(session: AsyncSession) -> None:
     """Update daemon_heartbeat_at in skool.scraper_settings on each daemon tick."""
     stmt = text(
         """
-        INSERT INTO skool.scraper_settings (id, daemon_heartbeat_at, updated_at)
-        VALUES (1, NOW(), NOW())
+        INSERT INTO skool.scraper_settings (
+            id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused, daemon_heartbeat_at, updated_at
+        )
+        VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET daemon_heartbeat_at = NOW()
         """
     )

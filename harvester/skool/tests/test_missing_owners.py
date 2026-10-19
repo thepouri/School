@@ -29,7 +29,7 @@ class TestMissingOwnersRepository(unittest.TestCase):
         mock_session.execute.assert_called_once()
 
     def test_heal_missing_owners_internally(self) -> None:
-        """Verify heal_missing_owners_internally executes the join update and returns rowcount."""
+        """Verify heal_missing_owners_internally executes the bidirectional healing and returns rowcount."""
         mock_session = AsyncMock()
         mock_result = MagicMock()
         mock_result.rowcount = 5
@@ -39,12 +39,12 @@ class TestMissingOwnersRepository(unittest.TestCase):
             return await repo.heal_missing_owners_internally(mock_session)
 
         count = asyncio.run(_run())
-        self.assertEqual(count, 5)
-        mock_session.execute.assert_called_once()
-        stmt_arg = mock_session.execute.call_args[0][0]
-        self.assertIn("skool.groups", str(stmt_arg))
-        self.assertIn("skool.user_groups", str(stmt_arg))
-        self.assertIn("role = 'owner'", str(stmt_arg))
+        self.assertEqual(count, 10)
+        self.assertEqual(mock_session.execute.call_count, 3)
+        all_stmts = " ".join(str(call[0][0]) for call in mock_session.execute.call_args_list)
+        self.assertIn("skool.groups", all_stmts)
+        self.assertIn("skool.user_groups", all_stmts)
+        self.assertIn("role = 'owner'", all_stmts)
 
 
 class TestMissingOwnersPipeline(unittest.TestCase):

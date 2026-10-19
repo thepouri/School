@@ -26,6 +26,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -221,11 +222,21 @@ class ScraperSettings(Base):
     __tablename__ = "scraper_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    refresh_interval_days: Mapped[int] = mapped_column(Integer, default=3)
-    discovery_interval_days: Mapped[int] = mapped_column(Integer, default=7)
-    refresh_cron: Mapped[str] = mapped_column(String(64), default="0 2 */3 * *")
-    discovery_cron: Mapped[str] = mapped_column(String(64), default="0 3 * * 0")
-    is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    refresh_interval_days: Mapped[int] = mapped_column(
+        Integer, default=3, server_default=text("3")
+    )
+    discovery_interval_days: Mapped[int] = mapped_column(
+        Integer, default=7, server_default=text("7")
+    )
+    refresh_cron: Mapped[str] = mapped_column(
+        String(64), default="0 2 */3 * *", server_default=text("'0 2 */3 * *'")
+    )
+    discovery_cron: Mapped[str] = mapped_column(
+        String(64), default="0 3 * * 0", server_default=text("'0 3 * * 0'")
+    )
+    is_paused: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     daemon_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

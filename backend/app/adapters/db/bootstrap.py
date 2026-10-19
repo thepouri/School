@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS skool.scraper_settings (
 ALTER TABLE skool.scraper_settings
 ADD COLUMN IF NOT EXISTS daemon_heartbeat_at timestamptz;
 
+ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_interval_days SET DEFAULT 3;
+ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_interval_days SET DEFAULT 7;
+ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_cron SET DEFAULT '0 2 */3 * *';
+ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_cron SET DEFAULT '0 3 * * 0';
+ALTER TABLE skool.scraper_settings ALTER COLUMN is_paused SET DEFAULT false;
+
 INSERT INTO skool.scraper_settings (id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused)
 VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false)
 ON CONFLICT (id) DO NOTHING;
@@ -91,12 +97,17 @@ CREATE INDEX IF NOT EXISTS ix_scraper_logs_job_id
 async def ensure_scraper_schema(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(SCRAPER_SCHEMA_SQL)
-        # Safe column type normalization for installs where tables were created with integer
+        # Safe column type and default normalization for existing and fresh installs
         try:
             await conn.execute("""
                 ALTER TABLE skool.scraper_jobs ALTER COLUMN id TYPE bigint;
                 ALTER TABLE skool.scraper_logs ALTER COLUMN id TYPE bigint;
                 ALTER TABLE skool.scraper_logs ALTER COLUMN job_id TYPE bigint;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_interval_days SET DEFAULT 3;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_interval_days SET DEFAULT 7;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_cron SET DEFAULT '0 2 */3 * *';
+                ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_cron SET DEFAULT '0 3 * * 0';
+                ALTER TABLE skool.scraper_settings ALTER COLUMN is_paused SET DEFAULT false;
             """)
         except Exception:
             pass
@@ -120,7 +131,7 @@ async def ensure_scraper_schema(pool) -> None:
         # Bidirectional healing for groups with owner info but missing in skool.users
         try:
             await conn.execute("""
-                INSERT INTO skool.users (id, name, display_name, created_at, updated_at)
+                INSERT INTO skool.users (id, name, full_name, created_at, updated_at)
                 SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
                 FROM skool.groups g
                 WHERE g.owner_id IS NOT NULL 
@@ -149,7 +160,6 @@ async def ensure_auth_schema(pool) -> None:
             ADD COLUMN IF NOT EXISTS label varchar(255),
             ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false
         """)
-        await conn.execute(SCRAPER_SCHEMA_SQL)
 
         # Seed initial admin account from environment if provided
         admin_email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
@@ -175,5 +185,6 @@ async def ensure_auth_schema(pool) -> None:
                     hash_password(admin_password),
                 )
                 logger.info("[auth] Initial admin account created for %s", admin_email)
+    await ensure_scraper_schema(pool)
     logger.info("[auth+scraper] schema ready")
 
