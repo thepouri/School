@@ -615,7 +615,7 @@ class PgScraperRepository:
                     ]
                     await conn.executemany(
                         """
-                        INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+                        INSERT INTO skool.user_groups (user_id, group_id, role, scraped_at)
                         VALUES ($1, $2, $3, COALESCE($4, NOW()))
                         ON CONFLICT (user_id, group_id) DO UPDATE SET
                             role = EXCLUDED.role
@@ -701,7 +701,7 @@ class PgScraperRepository:
                       AND NOT EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
                     ON CONFLICT (id) DO NOTHING;
 
-                    INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+                    INSERT INTO skool.user_groups (user_id, group_id, role, scraped_at)
                     SELECT DISTINCT g.owner_id, g.id, 'owner', NOW()
                     FROM skool.groups g
                     WHERE g.owner_id IS NOT NULL

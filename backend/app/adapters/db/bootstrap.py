@@ -139,7 +139,7 @@ async def ensure_scraper_schema(pool) -> None:
                   AND NOT EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
                 ON CONFLICT (id) DO NOTHING;
 
-                INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+                INSERT INTO skool.user_groups (user_id, group_id, role, scraped_at)
                 SELECT DISTINCT g.owner_id, g.id, 'owner', NOW()
                 FROM skool.groups g
                 WHERE g.owner_id IS NOT NULL

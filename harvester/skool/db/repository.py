@@ -687,7 +687,7 @@ async def heal_missing_owners_internally(session: AsyncSession) -> int:
     # 3. groups -> user_groups
     stmt3 = text(
         """
-        INSERT INTO skool.user_groups (user_id, group_id, role, created_at)
+        INSERT INTO skool.user_groups (user_id, group_id, role, scraped_at)
         SELECT DISTINCT g.owner_id, g.id, 'owner', NOW()
         FROM skool.groups g
         WHERE g.owner_id IS NOT NULL
