@@ -52,16 +52,26 @@ CREATE TABLE IF NOT EXISTS skool.scraper_settings (
 );
 
 ALTER TABLE skool.scraper_settings
-ADD COLUMN IF NOT EXISTS daemon_heartbeat_at timestamptz;
+ADD COLUMN IF NOT EXISTS daemon_heartbeat_at timestamptz,
+ADD COLUMN IF NOT EXISTS discovery_mode varchar(32) NOT NULL DEFAULT 'all',
+ADD COLUMN IF NOT EXISTS page_concurrency integer NOT NULL DEFAULT 4,
+ADD COLUMN IF NOT EXISTS detail_concurrency integer NOT NULL DEFAULT 8,
+ADD COLUMN IF NOT EXISTS request_delay_ms integer NOT NULL DEFAULT 300,
+ADD COLUMN IF NOT EXISTS include_bigrams boolean NOT NULL DEFAULT false;
 
 ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_interval_days SET DEFAULT 3;
 ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_interval_days SET DEFAULT 7;
 ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_cron SET DEFAULT '0 2 */3 * *';
 ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_cron SET DEFAULT '0 3 * * 0';
 ALTER TABLE skool.scraper_settings ALTER COLUMN is_paused SET DEFAULT false;
+ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_mode SET DEFAULT 'all';
+ALTER TABLE skool.scraper_settings ALTER COLUMN page_concurrency SET DEFAULT 4;
+ALTER TABLE skool.scraper_settings ALTER COLUMN detail_concurrency SET DEFAULT 8;
+ALTER TABLE skool.scraper_settings ALTER COLUMN request_delay_ms SET DEFAULT 300;
+ALTER TABLE skool.scraper_settings ALTER COLUMN include_bigrams SET DEFAULT false;
 
-INSERT INTO skool.scraper_settings (id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused)
-VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false)
+INSERT INTO skool.scraper_settings (id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused, discovery_mode, page_concurrency, detail_concurrency, request_delay_ms, include_bigrams)
+VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, 'all', 4, 8, 300, false)
 ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS skool.scraper_jobs (
@@ -103,11 +113,23 @@ async def ensure_scraper_schema(pool) -> None:
                 ALTER TABLE skool.scraper_jobs ALTER COLUMN id TYPE bigint;
                 ALTER TABLE skool.scraper_logs ALTER COLUMN id TYPE bigint;
                 ALTER TABLE skool.scraper_logs ALTER COLUMN job_id TYPE bigint;
+                ALTER TABLE skool.scraper_settings
+                ADD COLUMN IF NOT EXISTS discovery_mode varchar(32) NOT NULL DEFAULT 'all',
+                ADD COLUMN IF NOT EXISTS page_concurrency integer NOT NULL DEFAULT 4,
+                ADD COLUMN IF NOT EXISTS detail_concurrency integer NOT NULL DEFAULT 8,
+                ADD COLUMN IF NOT EXISTS request_delay_ms integer NOT NULL DEFAULT 300,
+                ADD COLUMN IF NOT EXISTS include_bigrams boolean NOT NULL DEFAULT false;
+
                 ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_interval_days SET DEFAULT 3;
                 ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_interval_days SET DEFAULT 7;
                 ALTER TABLE skool.scraper_settings ALTER COLUMN refresh_cron SET DEFAULT '0 2 */3 * *';
                 ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_cron SET DEFAULT '0 3 * * 0';
                 ALTER TABLE skool.scraper_settings ALTER COLUMN is_paused SET DEFAULT false;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN discovery_mode SET DEFAULT 'all';
+                ALTER TABLE skool.scraper_settings ALTER COLUMN page_concurrency SET DEFAULT 4;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN detail_concurrency SET DEFAULT 8;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN request_delay_ms SET DEFAULT 300;
+                ALTER TABLE skool.scraper_settings ALTER COLUMN include_bigrams SET DEFAULT false;
             """)
         except Exception:
             pass

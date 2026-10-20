@@ -132,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--page-concurrency", type=int, default=4)
     parser.add_argument("--detail-concurrency", type=int, default=8)
+    parser.add_argument(
+        "--include-bigrams",
+        action="store_true",
+        default=False,
+        help="include 676 exhaustive two-letter bigram combinations in search queries",
+    )
     parser.add_argument("--max-pages", type=int, default=34)
     parser.add_argument("--min-delay", type=float, default=0.3)
     parser.add_argument("--max-delay", type=float, default=1.0)
@@ -302,7 +308,7 @@ async def run(args: argparse.Namespace) -> None:
             log.info("=== Path B: query-driven ===")
             # On the search path, details are read only when explicitly requested
             await pipeline.run_search(
-                queries=args.queries or default_query_plan(),
+                queries=args.queries or default_query_plan(include_bigrams=args.include_bigrams),
                 languages=search_languages,
                 with_details=args.search_users and not args.no_details,
             )

@@ -124,7 +124,7 @@ class TestMissingOwnersPipeline(unittest.TestCase):
                     side_effect=[[("g999", "orphaned-group")], []]
                 )
 
-                async def _upsert_g(session, row):
+                async def _upsert_g(session, row, *args, **kwargs):
                     upserted_groups.append(row)
                     return 1
 

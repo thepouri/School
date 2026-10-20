@@ -293,7 +293,7 @@ class TestDiscoverySkippingAndRefresh(unittest.TestCase):
                 mock_scope.return_value.__aenter__ = _async_noop
                 mock_scope.return_value.__aexit__ = _async_noop
 
-                async def _upsert(session, row):
+                async def _upsert(session, row, *args, **kwargs):
                     upsert_called.append(row)
                     return 1
 

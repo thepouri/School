@@ -141,6 +141,11 @@ export default function ScraperDashboard() {
   const [refreshDays, setRefreshDays] = useState(3);
   const [discoveryDays, setDiscoveryDays] = useState(7);
   const [isPaused, setIsPaused] = useState(false);
+  const [discoveryMode, setDiscoveryMode] = useState('all');
+  const [pageConcurrency, setPageConcurrency] = useState(4);
+  const [detailConcurrency, setDetailConcurrency] = useState(8);
+  const [requestDelayMs, setRequestDelayMs] = useState(300);
+  const [includeBigrams, setIncludeBigrams] = useState(false);
   const [settingsFeedback, setSettingsFeedback] = useState(null);
 
   // Sync loaded settings to draft form state
@@ -154,6 +159,21 @@ export default function ScraperDashboard() {
       }
       if (settingsData.is_paused != null) {
         setIsPaused(Boolean(settingsData.is_paused));
+      }
+      if (settingsData.discovery_mode != null) {
+        setDiscoveryMode(settingsData.discovery_mode);
+      }
+      if (settingsData.page_concurrency != null) {
+        setPageConcurrency(settingsData.page_concurrency);
+      }
+      if (settingsData.detail_concurrency != null) {
+        setDetailConcurrency(settingsData.detail_concurrency);
+      }
+      if (settingsData.request_delay_ms != null) {
+        setRequestDelayMs(settingsData.request_delay_ms);
+      }
+      if (settingsData.include_bigrams != null) {
+        setIncludeBigrams(Boolean(settingsData.include_bigrams));
       }
     }
   }, [settingsData]);
@@ -199,6 +219,11 @@ export default function ScraperDashboard() {
         refresh_interval_days: Number(refreshDays),
         discovery_interval_days: Number(discoveryDays),
         is_paused: Boolean(isPaused),
+        discovery_mode: String(discoveryMode),
+        page_concurrency: Number(pageConcurrency),
+        detail_concurrency: Number(detailConcurrency),
+        request_delay_ms: Number(requestDelayMs),
+        include_bigrams: Boolean(includeBigrams),
       },
       {
         onSuccess: () => {
@@ -1065,6 +1090,94 @@ export default function ScraperDashboard() {
                 onChange={(e) => setDiscoveryDays(e.target.value)}
                 className="mt-2 h-10 w-full rounded-lg border border-stone-200 px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700">
+                Discovery Crawl Mode
+              </label>
+              <p className="mt-0.5 text-[11px] text-stone-400">
+                Strategy for finding new communities.
+              </p>
+              <select
+                value={discoveryMode}
+                onChange={(e) => setDiscoveryMode(e.target.value)}
+                className="mt-2 h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              >
+                <option value="all">All (Categories + Search + Details)</option>
+                <option value="browse">Browse Categories Only (Fast & Reliable)</option>
+                <option value="search">Keyword Search Only</option>
+                <option value="quick">Quick Light Discovery (Top 5 Pages)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700">
+                Page Concurrency (1 - 16)
+              </label>
+              <p className="mt-0.5 text-[11px] text-stone-400">
+                Parallel category/search pages (1 = sequential).
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={16}
+                required
+                value={pageConcurrency}
+                onChange={(e) => setPageConcurrency(e.target.value)}
+                className="mt-2 h-10 w-full rounded-lg border border-stone-200 px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700">
+                Detail Concurrency (1 - 24)
+              </label>
+              <p className="mt-0.5 text-[11px] text-stone-400">
+                Parallel about.json detail fetch requests.
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={24}
+                required
+                value={detailConcurrency}
+                onChange={(e) => setDetailConcurrency(e.target.value)}
+                className="mt-2 h-10 w-full rounded-lg border border-stone-200 px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700">
+                Request Delay Pace (ms)
+              </label>
+              <p className="mt-0.5 text-[11px] text-stone-400">
+                Delay between requests (e.g. 300ms, 0 for max speed).
+              </p>
+              <input
+                type="number"
+                min={0}
+                max={5000}
+                step={50}
+                required
+                value={requestDelayMs}
+                onChange={(e) => setRequestDelayMs(e.target.value)}
+                className="mt-2 h-10 w-full rounded-lg border border-stone-200 px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              />
+            </div>
+
+            <div className="flex flex-col justify-end">
+              <label className="flex h-10 cursor-pointer items-center gap-3 rounded-lg border border-stone-200 px-3 hover:bg-stone-50">
+                <input
+                  type="checkbox"
+                  checked={includeBigrams}
+                  onChange={(e) => setIncludeBigrams(e.target.checked)}
+                  className="h-4 w-4 rounded border-stone-300 text-brand-600 focus:ring-brand-500"
+                />
+                <span className="text-xs font-medium text-stone-700">
+                  Include 676 Exhaustive Bigrams (aa..zz)
+                </span>
+              </label>
             </div>
 
             <div className="flex flex-col justify-end">

@@ -58,6 +58,11 @@ class ScraperService:
             "refresh_interval_days": settings.get("refresh_interval_days", 3),
             "discovery_interval_days": settings.get("discovery_interval_days", 7),
             "is_paused": settings.get("is_paused", False),
+            "discovery_mode": settings.get("discovery_mode", "all"),
+            "page_concurrency": settings.get("page_concurrency", 4),
+            "detail_concurrency": settings.get("detail_concurrency", 8),
+            "request_delay_ms": settings.get("request_delay_ms", 300),
+            "include_bigrams": settings.get("include_bigrams", False),
         }
 
     async def update_settings(self, settings_data: dict) -> dict:
@@ -94,6 +99,42 @@ class ScraperService:
         if "is_paused" in settings_data:
             clean_data["is_paused"] = bool(settings_data["is_paused"])
 
+        if "discovery_mode" in settings_data and settings_data["discovery_mode"] is not None:
+            dm = str(settings_data["discovery_mode"]).lower().strip()
+            if dm not in ("all", "browse", "search", "quick", "details"):
+                raise ValueError("discovery_mode must be one of: all, browse, search, quick, details")
+            clean_data["discovery_mode"] = dm
+
+        if "page_concurrency" in settings_data and settings_data["page_concurrency"] is not None:
+            try:
+                pc = int(settings_data["page_concurrency"])
+            except (TypeError, ValueError):
+                raise ValueError("page_concurrency must be an integer")
+            if pc < 1 or pc > 16:
+                raise ValueError("page_concurrency must be between 1 and 16")
+            clean_data["page_concurrency"] = pc
+
+        if "detail_concurrency" in settings_data and settings_data["detail_concurrency"] is not None:
+            try:
+                dc = int(settings_data["detail_concurrency"])
+            except (TypeError, ValueError):
+                raise ValueError("detail_concurrency must be an integer")
+            if dc < 1 or dc > 24:
+                raise ValueError("detail_concurrency must be between 1 and 24")
+            clean_data["detail_concurrency"] = dc
+
+        if "request_delay_ms" in settings_data and settings_data["request_delay_ms"] is not None:
+            try:
+                rd = int(settings_data["request_delay_ms"])
+            except (TypeError, ValueError):
+                raise ValueError("request_delay_ms must be an integer")
+            if rd < 0 or rd > 5000:
+                raise ValueError("request_delay_ms must be between 0 and 5000")
+            clean_data["request_delay_ms"] = rd
+
+        if "include_bigrams" in settings_data and settings_data["include_bigrams"] is not None:
+            clean_data["include_bigrams"] = bool(settings_data["include_bigrams"])
+
         updated = await self._repo.update_settings(clean_data)
         return {
             "status": "updated",
@@ -101,6 +142,11 @@ class ScraperService:
                 "refresh_interval_days": updated.get("refresh_interval_days", 3),
                 "discovery_interval_days": updated.get("discovery_interval_days", 7),
                 "is_paused": updated.get("is_paused", False),
+                "discovery_mode": updated.get("discovery_mode", "all"),
+                "page_concurrency": updated.get("page_concurrency", 4),
+                "detail_concurrency": updated.get("detail_concurrency", 8),
+                "request_delay_ms": updated.get("request_delay_ms", 300),
+                "include_bigrams": updated.get("include_bigrams", False),
             },
         }
 

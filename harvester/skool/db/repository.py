@@ -150,55 +150,91 @@ _USER_METRIC_FIELDS = (
 
 
 async def _snapshot_group_metrics(
-    session: AsyncSession, rows: Sequence[dict[str, Any]]
+    session: AsyncSession,
+    rows: Sequence[dict[str, Any]],
+    mode: str = "initial_only",
 ) -> None:
-    """Append group_metrics rows, skipping redundant identical snapshots within 24 hours."""
+    """Record group_metrics snapshots according to mode.
+
+    * 'initial_only': ONLY write an initial snapshot if the group currently has ZERO
+      records in skool.group_metrics. If a group already has any snapshot, Discovery
+      never records another snapshot.
+    * 'refresh': Append a new periodic snapshot (deduplicated within 24h / same calendar day).
+    * 'none': Skip snapshots entirely.
+    """
+    if mode == "none" or not rows:
+        return
+
     group_ids = [row["id"] for row in rows if row and row.get("id")]
     if not group_ids:
         return
 
-    # Check latest snapshot per group
-    stmt = (
-        select(GroupMetric)
-        .distinct(GroupMetric.group_id)
-        .where(GroupMetric.group_id.in_(group_ids))
-        .order_by(GroupMetric.group_id, GroupMetric.captured_at.desc())
-    )
-    res = await session.execute(stmt)
-    latest_map = {m.group_id: m for m in res.scalars().all()}
+    if mode == "initial_only":
+        stmt = (
+            select(GroupMetric.group_id)
+            .where(GroupMetric.group_id.in_(group_ids))
+            .distinct()
+        )
+        res = await session.execute(stmt)
+        existing_with_metrics = set(res.scalars().all())
 
-    now = datetime.now(timezone.utc)
-    snapshots = []
-    for row in rows:
-        gid = row.get("id")
-        if not gid:
-            continue
-        latest = latest_map.get(gid)
-        if latest is not None:
-            lat_dt = latest.captured_at
-            if lat_dt.tzinfo is None:
-                lat_dt = lat_dt.replace(tzinfo=timezone.utc)
-            age_s = (now - lat_dt).total_seconds()
-
-            changed = (
-                row.get("total_members") != latest.total_members
-                or row.get("total_online_members") != latest.total_online_members
-                or row.get("total_posts") != latest.total_posts
-                or row.get("price_usd") != latest.price_usd
-                or row.get("total_admins") != latest.total_admins
-            )
-            # Skip if less than 24h old and key metrics didn't change
-            if not changed and age_s < 86400:
+        snapshots = []
+        for row in rows:
+            gid = row.get("id")
+            if not gid or gid in existing_with_metrics:
                 continue
+            snapshot = {"group_id": gid}
+            for field in _GROUP_METRIC_FIELDS:
+                value = row.get(field)
+                snapshot[field] = value if value is not None else None
+            snapshots.append(snapshot)
 
-        snapshot = {"group_id": gid}
-        for field in _GROUP_METRIC_FIELDS:
-            value = row.get(field)
-            snapshot[field] = value if value is not None else None
-        snapshots.append(snapshot)
+        if snapshots:
+            session.add_all([GroupMetric(**s) for s in snapshots])
+        return
 
-    if snapshots:
-        session.add_all([GroupMetric(**s) for s in snapshots])
+    if mode == "refresh":
+        # 3-day refresh mode: check latest snapshot per group to avoid duplicate on same day
+        stmt = (
+            select(GroupMetric)
+            .distinct(GroupMetric.group_id)
+            .where(GroupMetric.group_id.in_(group_ids))
+            .order_by(GroupMetric.group_id, GroupMetric.captured_at.desc())
+        )
+        res = await session.execute(stmt)
+        latest_map = {m.group_id: m for m in res.scalars().all()}
+
+        now = datetime.now(timezone.utc)
+        snapshots = []
+        for row in rows:
+            gid = row.get("id")
+            if not gid:
+                continue
+            latest = latest_map.get(gid)
+            if latest is not None:
+                lat_dt = latest.captured_at
+                if lat_dt.tzinfo is None:
+                    lat_dt = lat_dt.replace(tzinfo=timezone.utc)
+                age_s = (now - lat_dt).total_seconds()
+
+                changed = (
+                    row.get("total_members") != latest.total_members
+                    or row.get("total_online_members") != latest.total_online_members
+                    or row.get("total_posts") != latest.total_posts
+                    or row.get("price_usd") != latest.price_usd
+                    or row.get("total_admins") != latest.total_admins
+                )
+                if not changed and age_s < 86400:
+                    continue
+
+            snapshot = {"group_id": gid}
+            for field in _GROUP_METRIC_FIELDS:
+                value = row.get(field)
+                snapshot[field] = value if value is not None else None
+            snapshots.append(snapshot)
+
+        if snapshots:
+            session.add_all([GroupMetric(**s) for s in snapshots])
 
 
 async def _snapshot_user_metrics(
@@ -248,7 +284,11 @@ async def _snapshot_user_metrics(
         session.add_all([UserMetric(**s) for s in snapshots])
 
 
-async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -> int:
+async def upsert_groups(
+    session: AsyncSession,
+    rows: Sequence[dict[str, Any]],
+    snapshot_mode: str = "initial_only",
+) -> int:
     rows = [row for row in rows if row and row.get("id") and row.get("name")]
     if not rows:
         return 0
@@ -291,28 +331,30 @@ async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -
                     continue
                 raise
 
-        await _snapshot_group_metrics(session, chunk)
+        await _snapshot_group_metrics(session, chunk, mode=snapshot_mode)
 
         # Create and link stub users for any group with owner_id/owner_name
-        owner_stubs = [
-            {
-                "id": r["owner_id"],
-                "name": r["owner_name"],
-                "full_name": r.get("owner_name"),
-            }
-            for r in chunk
-            if r.get("owner_id") and r.get("owner_name")
-        ]
-        if owner_stubs:
-            owner_stubs = _normalize(_dedupe(_project(owner_stubs, USER_COLUMNS), "id"))
-            owner_stubs.sort(key=lambda u: str(u["id"]))
+        has_owners = any(r.get("owner_id") for r in chunk)
+        if has_owners:
+            owner_stubs = [
+                {
+                    "id": r["owner_id"],
+                    "name": r["owner_name"],
+                    "full_name": r.get("owner_name"),
+                }
+                for r in chunk
+                if r.get("owner_id") and r.get("owner_name")
+            ]
             if owner_stubs:
-                u_stmt = (
-                    pg_insert(User)
-                    .values(owner_stubs)
-                    .on_conflict_do_nothing(index_elements=[User.id])
-                )
-                await session.execute(u_stmt)
+                owner_stubs = _normalize(_dedupe(_project(owner_stubs, USER_COLUMNS), "id"))
+                owner_stubs.sort(key=lambda u: str(u["id"]))
+                if owner_stubs:
+                    u_stmt = (
+                        pg_insert(User)
+                        .values(owner_stubs)
+                        .on_conflict_do_nothing(index_elements=[User.id])
+                    )
+                    await session.execute(u_stmt)
 
             ug_links = [
                 {"user_id": r["owner_id"], "group_id": r["id"], "role": "owner"}
@@ -335,8 +377,27 @@ async def upsert_groups(session: AsyncSession, rows: Sequence[dict[str, Any]]) -
     return written
 
 
-async def upsert_group(session: AsyncSession, row: dict[str, Any]) -> int:
-    return await upsert_groups(session, [row])
+async def upsert_group(
+    session: AsyncSession,
+    row: dict[str, Any],
+    snapshot_mode: str = "initial_only",
+) -> int:
+    return await upsert_groups(session, [row], snapshot_mode=snapshot_mode)
+
+
+async def filter_unfetched_group_ids(
+    session: AsyncSession, group_ids: Sequence[str]
+) -> set[str]:
+    """Return the set of group_ids that need detail fetching (detail_fetched is False)."""
+    if not group_ids:
+        return set()
+    stmt = (
+        select(Group.id)
+        .where(Group.id.in_(group_ids))
+        .where(Group.detail_fetched.is_(False))
+    )
+    res = await session.execute(stmt)
+    return set(res.scalars().all())
 
 
 async def upsert_user(session: AsyncSession, row: dict[str, Any]) -> None:
@@ -461,15 +522,17 @@ async def mark_user_scraped(session: AsyncSession, user_ids: Sequence[str]) -> N
 
 
 async def pending_detail_groups(
-    session: AsyncSession, limit: int = 500
+    session: AsyncSession, limit: int = 500, after_id: str = ""
 ) -> list[tuple[str, str]]:
     """Groups whose about.json details have not been fetched."""
     stmt = (
         select(Group.id, Group.name)
         .where(Group.detail_fetched.is_(False))
         .where(Group.name.is_not(None))
-        .limit(limit)
     )
+    if after_id:
+        stmt = stmt.where(Group.id > after_id)
+    stmt = stmt.order_by(Group.id).limit(limit)
     result = await session.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
 
@@ -628,7 +691,7 @@ async def counts(session: AsyncSession) -> dict[str, int]:
 
 
 async def pending_missing_owner_groups(
-    session: AsyncSession, limit: int = 500
+    session: AsyncSession, limit: int = 500, after_id: str = ""
 ) -> list[tuple[str, str]]:
     """Groups where detail_fetched = True and (owner_id IS NULL or owner_name IS NULL)."""
     stmt = (
@@ -636,9 +699,10 @@ async def pending_missing_owner_groups(
         .where(Group.detail_fetched.is_(True))
         .where((Group.owner_id.is_(None)) | (Group.owner_name.is_(None)))
         .where(Group.name.is_not(None))
-        .order_by(Group.scraped_at.asc())
-        .limit(limit)
     )
+    if after_id:
+        stmt = stmt.where(Group.id > after_id)
+    stmt = stmt.order_by(Group.id.asc()).limit(limit)
     result = await session.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
 
@@ -708,9 +772,11 @@ async def update_daemon_heartbeat(session: AsyncSession) -> None:
     stmt = text(
         """
         INSERT INTO skool.scraper_settings (
-            id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused, daemon_heartbeat_at, updated_at
+            id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused,
+            discovery_mode, page_concurrency, detail_concurrency, request_delay_ms, include_bigrams,
+            daemon_heartbeat_at, updated_at
         )
-        VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, NOW(), NOW())
+        VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, 'all', 4, 8, 300, false, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET daemon_heartbeat_at = NOW()
         """
     )
@@ -718,13 +784,18 @@ async def update_daemon_heartbeat(session: AsyncSession) -> None:
 
 
 async def get_scraper_settings(session: AsyncSession) -> dict[str, Any] | None:
-    """Read dynamic intervals, cron expressions, and pause state from skool.scraper_settings."""
+    """Read dynamic intervals, cron expressions, pause state, and discovery settings from skool.scraper_settings."""
     stmt = select(
         ScraperSettings.refresh_interval_days,
         ScraperSettings.discovery_interval_days,
         ScraperSettings.refresh_cron,
         ScraperSettings.discovery_cron,
         ScraperSettings.is_paused,
+        ScraperSettings.discovery_mode,
+        ScraperSettings.page_concurrency,
+        ScraperSettings.detail_concurrency,
+        ScraperSettings.request_delay_ms,
+        ScraperSettings.include_bigrams,
     ).where(ScraperSettings.id == 1)
     result = await session.execute(stmt)
     row = result.one_or_none()
@@ -736,6 +807,11 @@ async def get_scraper_settings(session: AsyncSession) -> dict[str, Any] | None:
         "refresh_cron": str(row[2]),
         "discovery_cron": str(row[3]),
         "is_paused": bool(row[4]),
+        "discovery_mode": str(row[5] or "all"),
+        "page_concurrency": int(row[6] or 4),
+        "detail_concurrency": int(row[7] or 8),
+        "request_delay_ms": int(row[8] if row[8] is not None else 300),
+        "include_bigrams": bool(row[9] if row[9] is not None else False),
     }
 
 

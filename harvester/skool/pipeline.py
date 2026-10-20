@@ -236,7 +236,7 @@ class Pipeline:
           3. if the owner's profile isn't already complete in the DB → fetch it
              and write their owned + member groups, then mark them scraped
         """
-        if not await self._claim(self._seen_detail_groups, group_id):
+        if not force and not await self._claim(self._seen_detail_groups, group_id):
             return
 
         # Skip groups whose details are already complete in the database.
@@ -259,7 +259,9 @@ class Pipeline:
         async with session_scope() as session:
             if detail:
                 await repo.upsert_group(
-                    session, slice_.stamp(detail) if slice_ else detail
+                    session,
+                    slice_.stamp(detail) if slice_ else detail,
+                    snapshot_mode="refresh" if force else "initial_only",
                 )
             if owner:
                 await repo.upsert_user(session, owner)
@@ -319,6 +321,20 @@ class Pipeline:
         slice_: Slice | None,
         force: bool = False,
     ) -> None:
+        if not groups:
+            return
+
+        if not force:
+            cand_ids = [gid for gid, _ in groups if gid and gid not in self._seen_detail_groups]
+            if cand_ids:
+                async with session_scope() as session:
+                    unfetched_ids = await repo.filter_unfetched_group_ids(session, cand_ids)
+            else:
+                unfetched_ids = set()
+            groups = [(gid, name) for gid, name in groups if gid in unfetched_ids]
+            if not groups:
+                return
+
         tasks = [
             asyncio.create_task(self.process_group(gid, name, slice_, force=force))
             for gid, name in groups
@@ -665,20 +681,28 @@ class Pipeline:
     ) -> None:
         """Complete any group whose details have not been fetched."""
         processed = 0
+        last_id = ""
         while True:
             async with session_scope() as session:
-                pending = await repo.pending_detail_groups(session, limit=batch)
+                pending = await repo.pending_detail_groups(
+                    session, limit=batch, after_id=last_id
+                )
+            if not pending:
+                return
+            last_id = pending[-1][0]
             pending = [
                 item for item in pending if item[0] not in self._seen_detail_groups
             ]
             if not pending:
-                return
+                continue
             if max_groups is not None:
                 pending = pending[: max(0, max_groups - processed)]
                 if not pending:
                     return
             await self.enrich_groups(pending, None)
             processed += len(pending)
+            if max_groups is not None and processed >= max_groups:
+                return
 
     async def run_users(self, batch: int = 200, max_users: int | None = None) -> None:
         """Read owners whose profiles have not been fetched."""
@@ -858,16 +882,15 @@ class Pipeline:
 
         log.info("=== Missing owners recovery: Tier 2 targeted about.json fetch ===")
         processed_external = 0
+        last_id = ""
         while True:
             async with session_scope() as session:
-                pending = await repo.pending_missing_owner_groups(session, limit=batch)
+                pending = await repo.pending_missing_owner_groups(
+                    session, limit=batch, after_id=last_id
+                )
             if not pending:
                 break
-            pending = [
-                item for item in pending if item[0] not in self._seen_detail_groups
-            ]
-            if not pending:
-                break
+            last_id = pending[-1][0]
             if max_groups is not None:
                 pending = pending[: max(0, max_groups - processed_external)]
                 if not pending:

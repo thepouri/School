@@ -161,7 +161,9 @@ class PgScraperRepository:
             row = await conn.fetchrow(
                 """
                 SELECT refresh_interval_days, discovery_interval_days,
-                       refresh_cron, discovery_cron, is_paused
+                       refresh_cron, discovery_cron, is_paused,
+                       discovery_mode, page_concurrency, detail_concurrency,
+                       request_delay_ms, include_bigrams
                 FROM skool.scraper_settings
                 WHERE id = 1
                 """
@@ -173,6 +175,11 @@ class PgScraperRepository:
                     "refresh_cron": "0 2 */3 * *",
                     "discovery_cron": "0 3 * * 0",
                     "is_paused": False,
+                    "discovery_mode": "all",
+                    "page_concurrency": 4,
+                    "detail_concurrency": 8,
+                    "request_delay_ms": 300,
+                    "include_bigrams": False,
                 }
             return {
                 "refresh_interval_days": row["refresh_interval_days"],
@@ -180,6 +187,11 @@ class PgScraperRepository:
                 "refresh_cron": row["refresh_cron"],
                 "discovery_cron": row["discovery_cron"],
                 "is_paused": row["is_paused"],
+                "discovery_mode": row["discovery_mode"] or "all",
+                "page_concurrency": row["page_concurrency"] if row["page_concurrency"] is not None else 4,
+                "detail_concurrency": row["detail_concurrency"] if row["detail_concurrency"] is not None else 8,
+                "request_delay_ms": row["request_delay_ms"] if row["request_delay_ms"] is not None else 300,
+                "include_bigrams": bool(row["include_bigrams"]),
             }
 
     async def update_settings(self, settings_data: dict) -> dict:
@@ -192,16 +204,28 @@ class PgScraperRepository:
                     is_paused = COALESCE($3, is_paused),
                     refresh_cron = COALESCE($4, refresh_cron),
                     discovery_cron = COALESCE($5, discovery_cron),
+                    discovery_mode = COALESCE($6, discovery_mode),
+                    page_concurrency = COALESCE($7, page_concurrency),
+                    detail_concurrency = COALESCE($8, detail_concurrency),
+                    request_delay_ms = COALESCE($9, request_delay_ms),
+                    include_bigrams = COALESCE($10, include_bigrams),
                     updated_at = NOW()
                 WHERE id = 1
                 RETURNING refresh_interval_days, discovery_interval_days,
-                          refresh_cron, discovery_cron, is_paused
+                          refresh_cron, discovery_cron, is_paused,
+                          discovery_mode, page_concurrency, detail_concurrency,
+                          request_delay_ms, include_bigrams
                 """,
                 settings_data.get("refresh_interval_days"),
                 settings_data.get("discovery_interval_days"),
                 settings_data.get("is_paused"),
                 settings_data.get("refresh_cron"),
                 settings_data.get("discovery_cron"),
+                settings_data.get("discovery_mode"),
+                settings_data.get("page_concurrency"),
+                settings_data.get("detail_concurrency"),
+                settings_data.get("request_delay_ms"),
+                settings_data.get("include_bigrams"),
             )
             if not row:
                 return await self.get_settings()
@@ -211,6 +235,11 @@ class PgScraperRepository:
                 "refresh_cron": row["refresh_cron"],
                 "discovery_cron": row["discovery_cron"],
                 "is_paused": row["is_paused"],
+                "discovery_mode": row["discovery_mode"] or "all",
+                "page_concurrency": row["page_concurrency"] if row["page_concurrency"] is not None else 4,
+                "detail_concurrency": row["detail_concurrency"] if row["detail_concurrency"] is not None else 8,
+                "request_delay_ms": row["request_delay_ms"] if row["request_delay_ms"] is not None else 300,
+                "include_bigrams": bool(row["include_bigrams"]),
             }
 
     async def enqueue_job(self, job_type: str, trigger_type: str = "manual") -> int:

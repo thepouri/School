@@ -237,6 +237,21 @@ class ScraperSettings(Base):
     is_paused: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false")
     )
+    discovery_mode: Mapped[str] = mapped_column(
+        String(32), default="all", server_default=text("'all'")
+    )
+    page_concurrency: Mapped[int] = mapped_column(
+        Integer, default=4, server_default=text("4")
+    )
+    detail_concurrency: Mapped[int] = mapped_column(
+        Integer, default=8, server_default=text("8")
+    )
+    request_delay_ms: Mapped[int] = mapped_column(
+        Integer, default=300, server_default=text("300")
+    )
+    include_bigrams: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     daemon_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -240,6 +240,7 @@ class HarvesterScheduler:
         self.dry_run = dry_run
         self.enable_db = enable_db and DB_AVAILABLE
         self.is_paused: bool = False
+        self.settings: dict[str, Any] = {}
         self._stop_event = threading.Event()
         self._last_run_keys: dict[str, tuple[int, int, int, int, int]] = {}
         self._lock = threading.Lock()
@@ -319,7 +320,7 @@ class HarvesterScheduler:
         return bool(res)
 
     def reload_settings(self) -> dict[str, Any] | None:
-        """Read dynamic intervals, cron expressions, and pause state from skool.scraper_settings."""
+        """Read dynamic intervals, cron expressions, pause state, and discovery settings from skool.scraper_settings."""
         if not self.enable_db:
             return None
 
@@ -331,6 +332,8 @@ class HarvesterScheduler:
         if not settings:
             return None
 
+        self.settings = settings
+
         # Update pause state
         if "is_paused" in settings:
             prev_paused = self.is_paused
@@ -338,57 +341,146 @@ class HarvesterScheduler:
             if prev_paused != self.is_paused:
                 log.info("Scheduler pause state updated: is_paused=%s", self.is_paused)
 
-        # Update refresh interval and cron
-        ref_int = settings.get("refresh_interval_days")
+        # Update refresh job command & cron
         refresh_job = self.get_job("refresh")
-        if refresh_job and ref_int is not None:
-            cmd = list(refresh_job.command)
-            if "--refresh-days" in cmd:
-                idx = cmd.index("--refresh-days")
-                if idx + 1 < len(cmd):
-                    cmd[idx + 1] = str(ref_int)
-            else:
-                cmd.extend(["--refresh-days", str(ref_int)])
-            refresh_job.command = cmd
+        if refresh_job:
+            refresh_job.command = self.build_command_for_job_type("refresh")
+            ref_cron = settings.get("refresh_cron")
+            if ref_cron and refresh_job.cron != ref_cron:
+                log.info("Updated refresh job cron from '%s' to '%s'", refresh_job.cron, ref_cron)
+                refresh_job.cron = ref_cron
 
-        ref_cron = settings.get("refresh_cron")
-        if refresh_job and ref_cron and refresh_job.cron != ref_cron:
-            log.info("Updated refresh job cron from '%s' to '%s'", refresh_job.cron, ref_cron)
-            refresh_job.cron = ref_cron
-
-        # Update discovery cron
-        disc_cron = settings.get("discovery_cron")
+        # Update discovery job command & cron
         disc_job = self.get_job("discovery")
-        if disc_job and disc_cron and disc_job.cron != disc_cron:
-            log.info("Updated discovery job cron from '%s' to '%s'", disc_job.cron, disc_cron)
-            disc_job.cron = disc_cron
+        if disc_job:
+            disc_job.command = self.build_command_for_job_type("discovery")
+            disc_cron = settings.get("discovery_cron")
+            if disc_cron and disc_job.cron != disc_cron:
+                log.info("Updated discovery job cron from '%s' to '%s'", disc_job.cron, disc_cron)
+                disc_job.cron = disc_cron
 
         return settings
 
     def build_command_for_job_type(self, job_type: str) -> list[str]:
-        """Construct execution command line for a given job type."""
+        """Construct execution command line for a given job type with active dynamic settings."""
         py = sys.executable
         mode = job_type.lower().strip()
+
+        # Extract active settings with safe defaults
+        ref_days = self.settings.get("refresh_interval_days", 3)
+        page_conc = self.settings.get("page_concurrency", 4)
+        detail_conc = self.settings.get("detail_concurrency", 8)
+        delay_ms = self.settings.get("request_delay_ms", 300)
+        delay_s = max(0.0, float(delay_ms) / 1000.0)
+        include_bigrams = bool(self.settings.get("include_bigrams", False))
+        disc_mode = str(self.settings.get("discovery_mode", "all")).lower()
+        if disc_mode not in ("all", "browse", "search", "quick"):
+            disc_mode = "all"
+
         if mode == "refresh":
-            refresh_job = self.get_job("refresh")
-            if refresh_job:
-                return list(refresh_job.command)
-            return [py, "-m", "skool.main", "--mode", "refresh", "--refresh-days", "3", "--no-users"]
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "refresh",
+                "--refresh-days",
+                str(ref_days),
+                "--page-concurrency",
+                str(page_conc),
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+                "--no-users",
+            ]
         elif mode == "discovery":
-            disc_job = self.get_job("discovery")
-            if disc_job:
-                return list(disc_job.command)
-            return [py, "-m", "skool.main", "--mode", "all", "--no-users"]
+            target_mode = "browse" if disc_mode == "quick" else disc_mode
+            cmd = [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                target_mode,
+                "--page-concurrency",
+                str(page_conc),
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
+            if disc_mode == "quick":
+                cmd.extend(["--max-pages", "5"])
+            if include_bigrams:
+                cmd.append("--include-bigrams")
+            if target_mode != "all":
+                cmd.append("--no-users")
+            return cmd
         elif mode == "all":
-            return [py, "-m", "skool.main", "--mode", "all"]
+            cmd = [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "all",
+                "--page-concurrency",
+                str(page_conc),
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
+            if include_bigrams:
+                cmd.append("--include-bigrams")
+            return cmd
         elif mode in ("missing_owners", "missing-owners"):
-            return [py, "-m", "skool.main", "--mode", "missing-owners"]
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "missing-owners",
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
         elif mode == "details":
-            return [py, "-m", "skool.main", "--mode", "details"]
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "details",
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
         elif mode == "users":
-            return [py, "-m", "skool.main", "--mode", "users"]
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "users",
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
         else:
-            return [py, "-m", "skool.main", "--mode", mode.replace("_", "-")]
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                mode.replace("_", "-"),
+                "--page-concurrency",
+                str(page_conc),
+                "--detail-concurrency",
+                str(detail_conc),
+                "--min-delay",
+                f"{delay_s:.3f}",
+            ]
 
     def poll_and_execute_queued_jobs(self) -> int:
         """Poll queued manual jobs with status 'PENDING' from skool.scraper_jobs, claim and execute."""
