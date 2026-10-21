@@ -1,0 +1,47 @@
+{
+  "pageProps": {
+    "currentUser": {
+      "id": "usr_owner_999",
+      "name": "john-copywriter",
+      "firstName": "John",
+      "lastName": "Doe",
+      "createdAt": "2022-05-10T08:00:00.000Z",
+      "metadata": {
+        "bio": "7-figure copywriter & educator",
+        "location": "New York, USA",
+        "timezone": "America/New_York",
+        "pictureProfile": "https://assets.skool.com/user1_profile.jpg",
+        "pictureBubble": "https://assets.skool.com/user1_bubble.jpg",
+        "linkTwitter": "https://x.com/johndoe",
+        "linkLinkedin": "https://linkedin.com/in/johndoe",
+        "linkWebsite": "https://johndoe.com",
+        "linkYoutube": "https://youtube.com/@johndoe",
+        "lastOffline": "1719800000000000000"
+      },
+      "profileData": {
+        "totalFollowers": 450,
+        "totalFollowing": 12,
+        "totalContributions": 890,
+        "groupsCreatedByUser": [
+          {
+            "id": "grp_paid_123",
+            "name": "copywriting-mastery",
+            "displayName": "Copywriting Mastery"
+          },
+          {
+            "id": "grp_extra_444",
+            "name": "copywriting-inner-circle",
+            "displayName": "Copywriting Inner Circle"
+          }
+        ],
+        "groupsMemberOf": [
+          {
+            "id": "grp_free_456",
+            "name": "python-devs-free",
+            "displayName": "Python Developers Free Community"
+          }
+        ]
+      }
+    }
+  }
+}

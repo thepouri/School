@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
             "refresh",
             "missing-owners",
             "missing_owners",
+            "discover",
+            "drain",
+            "audit",
+            "repair",
+            "run-all",
             "all",
         ),
         default="all",
@@ -133,6 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execution-mode", choices=["parallel", "sequential"], default="parallel", help="execution mode for discovery passes")
     parser.add_argument("--page-concurrency", type=int, default=4)
     parser.add_argument("--detail-concurrency", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=12, help="concurrency for v2 queue worker pool (default: 12)")
+    parser.add_argument("--start-rps", type=float, default=3.0, help="initial target RPS for AdaptiveLimiter (default: 3.0)")
+    parser.add_argument("--max-rps", type=float, default=8.0, help="maximum RPS ceiling (default: 8.0)")
+    parser.add_argument("--min-rps", type=float, default=0.5, help="minimum RPS floor (default: 0.5)")
     parser.add_argument(
         "--include-bigrams",
         action="store_true",
@@ -239,6 +248,61 @@ def _norm(values: list[str] | None) -> list[str | None]:
     return [None if str(v).lower() in ("none", "null", "-") else v for v in values]
 
 
+import time
+
+async def _run_v2_worker_pool(args: argparse.Namespace, drain_until_empty: bool = True) -> None:
+    from .http_gateway import HttpGateway
+    from .token_manager import WafTokenManager, BuildIdManager
+    from .limiter import AdaptiveLimiter, CircuitBreaker
+    from .queue_engine import TaskWorkerPool
+    from .db import repository as repo
+
+    gateway = HttpGateway(impersonate="chrome")
+    waf_mgr = WafTokenManager(gateway=gateway, auth_token=args.cookies)
+    waf_mgr.start_proactive_refresher()
+    build_id_mgr = BuildIdManager(gateway=gateway, waf_manager=waf_mgr, initial_build_id=args.build_id)
+    limiter = AdaptiveLimiter(start_rps=args.start_rps, min_rps=args.min_rps, max_rps=args.max_rps)
+    breaker = CircuitBreaker(waf_manager=waf_mgr)
+
+    pool = TaskWorkerPool(
+        gateway=gateway,
+        waf_manager=waf_mgr,
+        build_id_manager=build_id_mgr,
+        limiter=limiter,
+        circuit_breaker=breaker,
+        concurrency=args.workers,
+    )
+
+    await pool.start()
+    last_log = time.time()
+    try:
+        while True:
+            await asyncio.sleep(2.0)
+            now = time.time()
+            if now - last_log >= 30.0:
+                last_log = now
+                async with session_scope() as session:
+                    task_counts = await repo.count_pending_tasks(session)
+                log.info(
+                    "Observability Telemetry: RPS=%.2f, Breaker=%s, Queue=%s, GatewayStats=%s",
+                    limiter.current_rps,
+                    breaker.state.value,
+                    task_counts,
+                    gateway.stats,
+                )
+            if drain_until_empty:
+                async with session_scope() as session:
+                    task_counts = await repo.count_pending_tasks(session)
+                active = task_counts.get("pending", 0) + task_counts.get("running", 0)
+                if active == 0:
+                    log.info("Queue is completely drained! 0 active tasks.")
+                    break
+    finally:
+        await pool.stop()
+        await waf_mgr.aclose()
+        await gateway.aclose()
+
+
 async def run(args: argparse.Namespace) -> None:
     if args.reset_db:
         await reset_db()
@@ -248,6 +312,86 @@ async def run(args: argparse.Namespace) -> None:
     elif args.init_db:
         await init_db()
         log.info("Schema and tables ready")
+        await dispose_db()
+        return
+
+    # ─── V2 Modular Modes ───
+    if args.mode == "audit":
+        log.info("=== Running Database Health & Completeness Audit ===")
+        from .repair_engine import RepairEngine
+        async with session_scope() as session:
+            report = await RepairEngine.run_audit(session)
+            log.info("Audit Summary: %s", report)
+        await dispose_db()
+        return
+
+    if args.mode == "repair":
+        log.info("=== Running Self-Healing Repair & Task Enqueue ===")
+        from .repair_engine import RepairEngine
+        async with session_scope() as session:
+            report = await RepairEngine.run_audit(session)
+            log.info("Initial Audit: %s", report)
+            stats = await RepairEngine.repair_and_enqueue(session)
+            log.info("Repair Actions: %s", stats)
+        # Drain the repaired tasks
+        log.info("Draining repair tasks with worker pool...")
+        await _run_v2_worker_pool(args, drain_until_empty=True)
+        await dispose_db()
+        return
+
+    if args.mode == "discover":
+        log.info("=== V2 Recursive Discovery Planning ===")
+        from .discovery_planner import DiscoveryPlanner
+        async with session_scope() as session:
+            seeded = await DiscoveryPlanner.seed_root_queries(
+                session=session,
+                categories=args.categories,
+                languages=languages,
+                prices=_norm(args.prices),
+                sorts=_norm(args.sorts),
+            )
+            log.info("Seeded %d root discovery queries", seeded)
+            # Enqueue initial discovery page tasks
+            query = await DiscoveryPlanner.get_next_query(session)
+            if query:
+                from .db import repository as repo
+                await repo.enqueue_task(
+                    session=session,
+                    task_type="discovery_page",
+                    dedupe_key=f"discovery_page:{query.query_hash}:1",
+                    payload={"params": query.params, "page": 1, "query_id": query.id},
+                    priority=5,
+                )
+        log.info("Starting worker pool to drain discovery tasks...")
+        await _run_v2_worker_pool(args, drain_until_empty=True)
+        await dispose_db()
+        return
+
+    if args.mode == "drain":
+        log.info("=== Draining Task Queue (fetch_tasks) ===")
+        await _run_v2_worker_pool(args, drain_until_empty=True)
+        await dispose_db()
+        return
+
+    if args.mode == "run-all":
+        log.info("=== V2 Orchestrated Continuous Pipeline (discover -> drain -> audit -> repair) ===")
+        from .discovery_planner import DiscoveryPlanner
+        from .repair_engine import RepairEngine
+        while True:
+            try:
+                async with session_scope() as session:
+                    await DiscoveryPlanner.seed_root_queries(session=session)
+                    await RepairEngine.repair_and_enqueue(session)
+                await _run_v2_worker_pool(args, drain_until_empty=True)
+                async with session_scope() as session:
+                    await RepairEngine.run_audit(session)
+                log.info("Cycle finished. Sleeping 5 minutes before next cycle...")
+                await asyncio.sleep(300.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("Cycle error: %s. Retrying in 60s...", exc)
+                await asyncio.sleep(60.0)
         await dispose_db()
         return
 

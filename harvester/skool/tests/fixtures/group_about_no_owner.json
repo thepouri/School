@@ -1,0 +1,15 @@
+{
+  "pageProps": {
+    "currentGroup": {
+      "id": "grp_orphan_789",
+      "name": "abandoned-group",
+      "displayName": "Abandoned Community",
+      "metadata": {
+        "description": "No active owner attached.",
+        "membership": 0,
+        "privacy": 2,
+        "totalMembers": 50
+      }
+    }
+  }
+}

@@ -24,7 +24,10 @@ from pathlib import Path
 
 from curl_cffi import requests as cffi
 
-from proxy import _normalize_entry
+try:
+    from .proxy import _normalize_entry
+except ImportError:
+    from proxy import _normalize_entry
 
 DEFAULT_FILE = Path(__file__).resolve().parent / "proxy.txt"
 DEFAULT_TARGET = "https://www.skool.com/discovery"

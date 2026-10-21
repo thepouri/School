@@ -5,9 +5,11 @@ Key point: Skool gives one field in two places under two different names:
 * User page (`@handle.json`) → camelCase: `firstName`, `linkInstagram`, `timeZone`
 * The `owner` block inside `about.json` → snake_case: `first_name`, `link_instagram`
 
-So we normalize every key (lowercase, drop separators) and then read them.
-Also some fields are JSON strings (`displayPrice`, `owner`, `links`, …) and
-in some places a dict — `_loads` accepts both.
+Defensive additions:
+* `dig(obj, path, default=None)` for deep, exception-free navigation.
+* Completeness evaluation (`evaluate_group_completeness`, `evaluate_user_completeness`)
+  returning granular statuses (ok, partial, stub, failed) and 0..100 completeness score.
+* Resilient JSON parsing of metadata blocks.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone as _timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,40 @@ def _loads(value: Any) -> Any:
         except (ValueError, TypeError):
             return None
     return None
+
+
+def dig(obj: Any, path: str | Sequence[str | int], default: Any = None) -> Any:
+    """Safe deep getter across dictionaries and lists without KeyError or IndexError.
+
+    Examples:
+        dig(payload, "pageProps.currentGroup.metadata.owner.id")
+        dig(payload, ["pageProps", "items", 0, "name"])
+    """
+    if obj is None:
+        return default
+    if isinstance(path, str):
+        parts = [p for p in path.split(".") if p]
+    else:
+        parts = list(path)
+
+    current = obj
+    for part in parts:
+        if current is None:
+            return default
+        if isinstance(current, dict):
+            current = current.get(str(part))
+        elif isinstance(current, (list, tuple)):
+            try:
+                idx = int(part)
+                if 0 <= idx < len(current):
+                    current = current[idx]
+                else:
+                    return default
+            except (ValueError, TypeError):
+                return default
+        else:
+            return default
+    return current if current is not None else default
 
 
 def _clean(value: Any) -> str | None:
@@ -138,6 +174,68 @@ def page_props(payload: dict[str, Any]) -> dict[str, Any]:
     return props if isinstance(props, dict) else {}
 
 
+# ────────────────── completeness evaluation ──────────────────
+
+
+def evaluate_group_completeness(group: dict[str, Any]) -> tuple[str, int]:
+    """Evaluate completeness and determine detail_status for a parsed group.
+
+    Returns:
+        (detail_status, completeness_score)
+        where status in ('ok', 'partial', 'failed')
+        completeness in 0..100
+    """
+    if not group or not group.get("id") or not group.get("name"):
+        return "failed", 0
+
+    required_fields = ["display_name", "total_members", "is_public", "owner_id", "owner_name"]
+    has_price = (
+        group.get("price_amount_cents") is not None
+        or group.get("price_usd") is not None
+        or group.get("membership_model") == 0
+    )
+
+    present_count = sum(1 for f in required_fields if group.get(f) is not None)
+    if has_price:
+        present_count += 1
+    total_count = len(required_fields) + 1  # 6 criteria total
+
+    score = round((present_count / total_count) * 100)
+
+    if score == 100:
+        return "ok", 100
+    elif score >= 50:
+        return "partial", score
+    else:
+        return "partial" if (group.get("id") and group.get("name")) else "failed", score
+
+
+def evaluate_user_completeness(user: dict[str, Any], communities_present: bool = False) -> tuple[str, int]:
+    """Evaluate completeness and determine profile_status for a parsed user.
+
+    Returns:
+        (profile_status, completeness_score)
+        where status in ('ok', 'partial', 'stub', 'failed')
+    """
+    if not user or not user.get("id") or not user.get("name"):
+        return "failed", 0
+
+    has_names = bool(user.get("first_name") or user.get("last_name") or user.get("full_name"))
+    if not has_names and not user.get("bio") and not user.get("avatar_url"):
+        return "stub", 20
+
+    eval_fields = ["full_name", "location", "timezone", "avatar_url", "bio", "total_contributions"]
+    present = sum(1 for f in eval_fields if user.get(f) is not None)
+    if communities_present:
+        present += 1
+    total_eval = len(eval_fields) + 1
+
+    score = round((present / total_eval) * 100)
+    if has_names and (score >= 40 or communities_present):
+        return "ok", max(score, 80)
+    return "partial", max(score, 30)
+
+
 # ────────────────── discovery ──────────────────
 
 
@@ -230,7 +328,6 @@ def parse_price(metadata: Any) -> tuple[int | None, str | None, str | None]:
             continue
         found = _number(payload, "amount", "amountCents", "price")
         if found is None and amount is None:
-            # may only have currency
             currency = currency or _text(payload, "currency")
             continue
         if amount is None:
@@ -251,19 +348,11 @@ def parse_price(metadata: Any) -> tuple[int | None, str | None, str | None]:
 
 # ────────────────── public / private ──────────────────
 
-# The group metadata carries a numeric `privacy` field: 1 = public, 2 (or more) = private
 PRIVACY_PUBLIC = 1
 
 
 def parse_is_public(metadata: Any) -> bool | None:
-    """Determine whether the group is public/private.
-
-    Order of attempts:
-    1. A string field (`groupType`/`visibility`/`privacyType` = "public"/"private")
-    2. The numeric field `privacy` → 1 means public, 2 and above private
-
-    If neither is present, None is returned (i.e. unknown, not private).
-    """
+    """Determine whether the group is public/private."""
     meta = _flat(metadata)
 
     text = _text(meta, "groupType", "visibility", "privacyType", "privacyLevel")
@@ -297,7 +386,6 @@ def parse_group(raw: dict[str, Any]) -> dict[str, Any] | None:
     top = _flat(raw)
     meta = _flat(raw.get("metadata"))
     amount, currency, interval = parse_price(raw.get("metadata"))
-
     owner_blob = _flat(_pick(meta, "owner", "createdByUser", "user"))
     owner_id = _text(meta, "createdBy") or _text(owner_blob, "id") or _text(top, "ownerId")
     owner_name = _text(owner_blob, "name") or _text(top, "ownerName")
@@ -318,7 +406,6 @@ def parse_group(raw: dict[str, Any]) -> dict[str, Any] | None:
         "price_usd": round(amount / 100, 2) if amount is not None else None,
         "price_currency": currency,
         "price_interval": interval,
-        # about.json uses key `membership`, discovery uses `membershipModel`
         "membership_model": _number(meta, "membershipModel", "membership"),
         "privacy": _number(meta, "privacy", "groupType", "visibility"),
         "is_public": parse_is_public(raw.get("metadata")),
@@ -340,26 +427,25 @@ def parse_group(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def parse_group_detail(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Parse the group from `about.json` (key `currentGroup`)."""
+    """Parse the group from `about.json` (key `currentGroup`) with completeness scoring."""
     props = page_props(payload)
     for key in ("currentGroup", "group"):
         raw = _loads(props.get(key))
         if isinstance(raw, dict):
             row = parse_group(raw)
             if row:
+                detail_status, completeness = evaluate_group_completeness(row)
+                row["detail_status"] = detail_status
+                row["completeness"] = completeness
+                row["detail_fetched"] = (detail_status in ("ok", "partial"))
                 return row
     return None
 
 
 def group_owner(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Turn the `owner` block inside about.json into a user record.
-
-    Defensively searches props top-level, currentGroup top-level,
-    and metadata for user/owner dictionaries.
-    """
+    """Turn the `owner` block inside about.json into a user record."""
     props = page_props(payload)
 
-    # 1. Direct candidate blocks on pageProps
     for key in ("owner", "groupOwner", "creator", "createdByUser", "user"):
         blob = _loads(props.get(key))
         if isinstance(blob, dict):
@@ -367,13 +453,11 @@ def group_owner(payload: dict[str, Any]) -> dict[str, Any] | None:
             if row:
                 return row
 
-    # 2. Inside currentGroup / group
     for key in ("currentGroup", "group"):
         raw = _loads(props.get(key))
         if not isinstance(raw, dict):
             continue
 
-        # Top-level on raw group object
         for o_key in ("owner", "createdByUser", "creator", "user"):
             blob = _loads(raw.get(o_key))
             if isinstance(blob, dict):
@@ -381,7 +465,6 @@ def group_owner(payload: dict[str, Any]) -> dict[str, Any] | None:
                 if row:
                     return row
 
-        # Inside metadata
         meta = _flat(raw.get("metadata"))
         blob = _loads(_pick(meta, "owner", "createdByUser", "user", "creator"))
         if isinstance(blob, dict):
@@ -411,7 +494,6 @@ def parse_user_record(
     meta = _flat(raw.get("metadata"))
     stats = _flat(profile if profile is not None else _pick(top, "profileData"))
 
-    # first/last name live on the user itself, not in metadata
     first_name = _text(top, "firstName") or _text(meta, "firstName")
     last_name = _text(top, "lastName") or _text(meta, "lastName")
 
@@ -419,7 +501,6 @@ def parse_user_record(
         meta, "timezone", "timeZone", "tz"
     )
     location = _text(meta, "location", "city", "country")
-    # requested rule: if location is empty, fill it from the timezone
     if location:
         location_source = "profile"
     elif timezone_name:
@@ -428,14 +509,13 @@ def parse_user_record(
     else:
         location_source = None
 
-    return {
+    row = {
         "id": user_id,
         "name": name,
         "first_name": first_name,
         "last_name": last_name,
         "full_name": " ".join(part for part in (first_name, last_name) if part) or None,
         "bio": _text(meta, "bio", "about"),
-        # the email column was removed: the site always returns ""
         "location": location,
         "location_source": location_source,
         "timezone": timezone_name,
@@ -447,7 +527,6 @@ def parse_user_record(
         "link_twitter": _text(meta, "linkTwitter"),
         "link_website": _text(meta, "linkWebsite"),
         "link_youtube": _text(meta, "linkYoutube", "linkYouTube"),
-        # myers_briggs / disc_top / email / total_groups / total_posts removed
         "last_offline": _ns_dt(_pick(meta, "lastOffline")),
         "total_followers": _number(stats, "totalFollowers"),
         "total_following": _number(stats, "totalFollowing"),
@@ -455,6 +534,11 @@ def parse_user_record(
         "created_at": _dt(_pick(top, "createdAt")),
         "updated_at": _dt(_pick(top, "updatedAt")),
     }
+
+    # Evaluate default initial status
+    status, _ = evaluate_user_completeness(row)
+    row["profile_status"] = status
+    return row
 
 
 def _groups_in(profile: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -474,12 +558,7 @@ def _groups_in(profile: dict[str, Any], key: str) -> list[dict[str, Any]]:
 def find_group_lists(
     payload: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Groups linked to a user, split by relation.
-
-    Returns {"owned": [...], "member": [...]}:
-      * owned  — `profileData.groupsCreatedByUser` (the user created them)
-      * member — `profileData.groupsMemberOf` (the user joined them)
-    """
+    """Groups linked to a user, split by relation."""
     props = page_props(payload)
     render = props.get("renderData") if isinstance(props.get("renderData"), dict) else {}
     user = props.get("currentUser") or (render or {}).get("user") or {}
@@ -496,7 +575,6 @@ def find_group_lists(
         for item in _groups_in(profile, "groupsMemberOf"):
             member[str(item["id"])] = item
 
-    # a group cannot be both owned and merely member-of; owned wins
     for gid in owned:
         member.pop(gid, None)
     return {"owned": list(owned.values()), "member": list(member.values())}
@@ -522,23 +600,17 @@ def parse_user_page(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not user_row:
         return None
 
-    # the total_groups column was removed: the site's `totalGroups` includes
-    # membership groups too and does not match the real count of a user's own
-    # groups. Get the right count with
-    # SELECT count(*) FROM groups WHERE owner_id = ...
-    return {"user": user_row, **find_group_lists(payload)}
+    group_lists = find_group_lists(payload)
+    has_communities = bool(group_lists.get("owned") or group_lists.get("member"))
+    status, _ = evaluate_user_completeness(user_row, communities_present=has_communities)
+    user_row["profile_status"] = status
+    user_row["groups_fetched"] = (status == "ok")
+
+    return {"user": user_row, **group_lists}
 
 
 def parse_member_search(payload: dict[str, Any]) -> dict[str, Any]:
-    """`{group}/-/search.json?t=members` page → member user records.
-
-    The payload has `pageProps.members` — a list of membership entries, each
-    carrying the nested `user` object with the full profile fields. Only those
-    nested users are returned, as `parse_user_record` rows.
-
-    Returns {"users": [records...], "total": int, "page": int, "has_more": bool}.
-    `total` comes from `pageProps.totalMembers`.
-    """
+    """`{group}/-/search.json?t=members` page → member user records."""
     props = page_props(payload)
     members = props.get("members")
     users: list[dict[str, Any]] = []
@@ -559,5 +631,3 @@ def parse_member_search(payload: dict[str, Any]) -> dict[str, Any]:
         "page": page,
         "has_more": bool(users) and (total is None or (page * 30) < total),
     }
-
-

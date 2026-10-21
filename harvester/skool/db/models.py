@@ -14,6 +14,7 @@ The plans table was removed: Skool no longer returns public data for
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -23,11 +24,13 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -86,8 +89,24 @@ class Group(Base):
 
     # browse | search | snowball
     discovered_via: Mapped[str | None] = mapped_column(String(16))
-    # whether full details were fetched from about.json
+    # whether full details were fetched from about.json (kept for backwards compatibility)
     detail_fetched: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ─── Stage 2 enhanced detail tracking ───
+    detail_status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default=text("'pending'")
+    )  # pending | ok | partial | failed | gone
+    detail_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    detail_last_error: Mapped[str | None] = mapped_column(Text)
+    detail_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completeness: Mapped[int] = mapped_column(
+        SmallInteger, default=0, server_default=text("0")
+    )  # 0..100
 
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -126,16 +145,25 @@ class User(Base):
 
     last_offline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    # removed: email (always empty), myers_briggs, disc_top,
-    # total_groups (the site's `totalGroups` includes memberships and was
-    # wrong; the right count is SELECT count(*) FROM groups WHERE owner_id = users.id),
-    # and total_posts (the site has no such stat for users)
     total_followers: Mapped[int | None] = mapped_column(Integer)
     total_following: Mapped[int | None] = mapped_column(Integer)
     total_contributions: Mapped[int | None] = mapped_column(Integer)
 
-    # whether the full profile (and group list) has been fetched
+    # whether the full profile (and group list) has been fetched (kept for compatibility)
     groups_fetched: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ─── Stage 2 enhanced user tracking ───
+    profile_status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default=text("'pending'")
+    )  # pending | ok | partial | failed | gone | stub
+    profile_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    profile_last_error: Mapped[str | None] = mapped_column(Text)
+    profile_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -157,6 +185,10 @@ class UserGroup(Base):
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     group_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(24), nullable=True)  # owner_about | profile | member_search
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     scraped_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -164,6 +196,8 @@ class UserGroup(Base):
 
 Index("ix_groups_category_language", Group.category_slug, Group.language)
 Index("ix_groups_detail_pending", Group.detail_fetched)
+Index("ix_groups_detail_status", Group.detail_status)
+Index("ix_users_profile_status", User.profile_status)
 Index("ix_user_groups_group", UserGroup.group_id)
 
 
@@ -292,4 +326,91 @@ class ScraperLog(Base):
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class FetchTask(Base):
+    """Persistent DB-backed Task Queue for atomic leasing and retries."""
+
+    __tablename__ = "fetch_tasks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    priority: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=5, server_default=text("5")
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=6, server_default=text("6")
+    )
+    not_before: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(64))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    job_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("scraper_jobs.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DiscoveryQuery(Base):
+    """Resumable discovery queries with recursive faceting and saturation tracking."""
+
+    __tablename__ = "discovery_queries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    query_hash: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    depth: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
+    )
+    pages_done: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    total_hint: Mapped[int | None] = mapped_column(Integer)
+    hit_cap: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    new_groups: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    seen_groups: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RawResponse(Base):
+    """Raw JSON responses for fast re-parsing without hitting the network."""
+
+    __tablename__ = "raw_responses"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(SmallInteger)
+    body: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

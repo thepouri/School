@@ -1,0 +1,48 @@
+{
+  "pageProps": {
+    "currentGroup": {
+      "id": "grp_paid_123",
+      "name": "copywriting-mastery",
+      "displayName": "Copywriting Mastery",
+      "createdAt": "2023-01-15T12:00:00.000Z",
+      "updatedAt": "2023-06-20T15:30:00.000Z",
+      "metadata": {
+        "description": "Learn professional copywriting and scaling.",
+        "lpDescription": "Landing page details here.",
+        "color": "#1A202C",
+        "initials": "CM",
+        "coverUrl": "https://assets.skool.com/cover1.jpg",
+        "logoUrl": "https://assets.skool.com/logo1.jpg",
+        "currentMBp": {
+          "currency": "usd",
+          "amount": 4900
+        },
+        "recurringInterval": "month",
+        "membership": 1,
+        "privacy": 1,
+        "totalMembers": 1250,
+        "totalOnlineMembers": 45,
+        "totalPosts": 340,
+        "totalAdmins": 3,
+        "totalRules": 5,
+        "numCourses": 4,
+        "numModules": 28,
+        "aflPercent": 20,
+        "owner": {
+          "id": "usr_owner_999",
+          "name": "john-copywriter",
+          "firstName": "John",
+          "lastName": "Doe",
+          "metadata": {
+            "bio": "7-figure copywriter",
+            "location": "New York, USA",
+            "timezone": "America/New_York",
+            "picture": "https://assets.skool.com/user1.jpg",
+            "linkTwitter": "https://x.com/johndoe",
+            "linkLinkedin": "https://linkedin.com/in/johndoe"
+          }
+        }
+      }
+    }
+  }
+}

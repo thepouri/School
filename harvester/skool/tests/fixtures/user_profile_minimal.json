@@ -1,0 +1,9 @@
+{
+  "pageProps": {
+    "currentUser": {
+      "id": "usr_minimal_333",
+      "name": "silent-user-333",
+      "metadata": {}
+    }
+  }
+}

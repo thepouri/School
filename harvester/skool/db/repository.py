@@ -19,8 +19,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
+    DiscoveryQuery,
+    FetchTask,
     Group,
     GroupMetric,
+    RawResponse,
     ScraperJob,
     ScraperLog,
     ScraperSettings,
@@ -28,6 +31,7 @@ from .models import (
     UserGroup,
     UserMetric,
 )
+from sqlalchemy import String, Text
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +49,16 @@ GROUP_KEEP_FIRST = frozenset(
 )
 # detail_fetched is a progress flag, changed only via mark_detail_fetched
 GROUP_IMMUTABLE = frozenset({"id", "detail_fetched"})
+
+# Discovery must NEVER touch detail status or about-only fields
+GROUP_ABOUT_FIELDS = frozenset({
+    "detail_status",
+    "detail_attempts",
+    "detail_last_error",
+    "detail_fetched_at",
+    "completeness",
+    "detail_fetched",
+})
 
 USER_KEEP_FIRST = frozenset({"created_at"})
 USER_IMMUTABLE = frozenset({"id", "groups_fetched"})
@@ -103,14 +117,21 @@ def _build_set(
     immutable: frozenset[str],
 ) -> dict[str, Any]:
     updates: dict[str, Any] = {}
+    table_cols = model.__table__.columns
     for column in columns:
         if column in immutable:
             continue
         current = getattr(model, column)
+        col_attr = table_cols.get(column)
+        is_string = col_attr is not None and isinstance(col_attr.type, (String, Text))
+
+        # Never overwrite good with empty: NULLIF empty string to NULL before COALESCE
+        val = func.nullif(excluded[column], "") if is_string else excluded[column]
+
         if column in keep_first:
-            updates[column] = func.coalesce(current, excluded[column])
+            updates[column] = func.coalesce(current, val)
         else:
-            updates[column] = func.coalesce(excluded[column], current)
+            updates[column] = func.coalesce(val, current)
     return updates
 
 
@@ -289,6 +310,7 @@ async def upsert_groups(
     session: AsyncSession,
     rows: Sequence[dict[str, Any]],
     snapshot_mode: str = "none",
+    source: str = "discovery",
 ) -> int:
     rows = [row for row in rows if row and row.get("id") and row.get("name")]
     if not rows:
@@ -302,6 +324,8 @@ async def upsert_groups(
 
     written = 0
     group_columns = [column.key for column in Group.__table__.columns]
+    immutable = GROUP_IMMUTABLE if source == "about" else (GROUP_IMMUTABLE | GROUP_ABOUT_FIELDS)
+
     for chunk in _batches(rows, columns=group_columns):
         # Guarantee chunk ordering
         chunk.sort(key=lambda r: str(r.get("id", "")))
@@ -311,7 +335,7 @@ async def upsert_groups(
             list(chunk[0].keys()),
             stmt.excluded,
             GROUP_KEEP_FIRST,
-            GROUP_IMMUTABLE,
+            immutable,
         )
         updates["scraped_at"] = func.now()
         stmt = stmt.on_conflict_do_update(index_elements=[Group.id], set_=updates)
@@ -779,8 +803,8 @@ async def heal_missing_owners_internally(session: AsyncSession) -> int:
     # 2. groups -> users
     stmt2 = text(
         """
-        INSERT INTO skool.users (id, name, full_name, created_at, updated_at)
-        SELECT DISTINCT ON (g.owner_name) g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
+        INSERT INTO skool.users (id, name, full_name, groups_fetched, profile_status, created_at, updated_at)
+        SELECT DISTINCT ON (g.owner_name) g.owner_id, g.owner_name, g.owner_name, false, 'stub', NOW(), NOW()
         FROM skool.groups g
         WHERE g.owner_id IS NOT NULL 
           AND g.owner_name IS NOT NULL
@@ -1003,3 +1027,283 @@ async def cleanup_dangling_running_jobs(session: AsyncSession) -> int:
     res = await session.execute(stmt)
     return int(res.rowcount or 0)
 
+
+
+# ────────────────── Stub Upsert Helpers ──────────────────
+
+
+async def upsert_stub_user(
+    session: AsyncSession,
+    user_id: str,
+    user_name: str,
+    full_name: str | None = None,
+) -> None:
+    """Immediately insert stub user if missing (never overwrite existing richer profile)."""
+    if not user_id or not user_name:
+        return
+    clean_id = str(user_id).strip()
+    clean_name = str(user_name).strip()
+    if not clean_id or not clean_name:
+        return
+    stmt = (
+        pg_insert(User)
+        .values(
+            id=clean_id,
+            name=clean_name,
+            full_name=full_name or clean_name,
+            groups_fetched=False,
+            profile_status="stub",
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)
+
+
+async def upsert_stub_group(
+    session: AsyncSession,
+    group_id: str,
+    group_name: str,
+    display_name: str | None = None,
+) -> None:
+    """Immediately insert stub group if missing (never overwrite existing details)."""
+    if not group_id or not group_name:
+        return
+    clean_id = str(group_id).strip()
+    clean_name = str(group_name).strip()
+    if not clean_id or not clean_name:
+        return
+    stmt = (
+        pg_insert(Group)
+        .values(
+            id=clean_id,
+            name=clean_name,
+            display_name=display_name or clean_name,
+            detail_status="pending",
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)
+
+
+# ────────────────── Atomic Task-Level Writers ──────────────────
+
+
+async def upsert_group_about(
+    session: AsyncSession,
+    group_row: dict[str, Any],
+    owner_row: dict[str, Any] | None = None,
+    snapshot_mode: str = "refresh",
+) -> None:
+    """Atomic write for group_about:
+    1. Upsert group with full about fields + detail_status + completeness
+    2. Snapshot metrics (if changed or >24h)
+    3. Immediate stub user for owner
+    4. Link user_groups as role='owner', source='owner_about'
+    """
+    await upsert_groups(session, [group_row], snapshot_mode=snapshot_mode, source="about")
+
+    owner_id = group_row.get("owner_id")
+    owner_name = group_row.get("owner_name")
+
+    if owner_row and owner_row.get("id") and owner_row.get("name"):
+        owner_id = owner_row["id"]
+        owner_name = owner_row["name"]
+        await upsert_stub_user(
+            session,
+            user_id=owner_id,
+            user_name=owner_name,
+            full_name=owner_row.get("full_name") or owner_name,
+        )
+    elif owner_id and owner_name:
+        await upsert_stub_user(session, user_id=owner_id, user_name=owner_name)
+
+    if owner_id and group_row.get("id"):
+        ug_stmt = (
+            pg_insert(UserGroup)
+            .values(
+                user_id=owner_id,
+                group_id=group_row["id"],
+                role="owner",
+                source="owner_about",
+            )
+            .on_conflict_do_update(
+                index_elements=[UserGroup.user_id, UserGroup.group_id],
+                set_={
+                    "role": "owner",
+                    "source": "owner_about",
+                    "last_seen_at": func.now(),
+                },
+            )
+        )
+        await session.execute(ug_stmt)
+
+
+async def upsert_user_profile(
+    session: AsyncSession,
+    user_row: dict[str, Any],
+    owned_groups: Sequence[dict[str, Any]] = (),
+    member_groups: Sequence[dict[str, Any]] = (),
+) -> None:
+    """Atomic write for user_profile:
+    1. Upsert user with full profile + profile_status='ok'
+    2. Snapshot user metrics (deduplicated <24h)
+    3. Insert stub groups for unknown communities
+    4. Link owned_groups (role='owner') and member_groups (role='member')
+    """
+    await upsert_user(session, user_row)
+    uid = user_row.get("id")
+    if not uid:
+        return
+
+    # 1. Owned groups
+    for g in owned_groups:
+        gid = g.get("id")
+        gname = g.get("name")
+        if gid and gname:
+            await upsert_stub_group(session, group_id=gid, group_name=gname, display_name=g.get("display_name"))
+
+    if owned_groups:
+        owned_ids = [g["id"] for g in owned_groups if g.get("id")]
+        await link_user_groups(session, user_id=uid, group_ids=owned_ids, role="owner")
+
+    # 2. Member groups
+    for g in member_groups:
+        gid = g.get("id")
+        gname = g.get("name")
+        if gid and gname:
+            await upsert_stub_group(session, group_id=gid, group_name=gname, display_name=g.get("display_name"))
+
+    if member_groups:
+        member_ids = [g["id"] for g in member_groups if g.get("id")]
+        await link_user_groups(session, user_id=uid, group_ids=member_ids, role="member")
+
+
+# ────────────────── DB-Backed Task Queue ──────────────────
+
+
+async def enqueue_task(
+    session: AsyncSession,
+    task_type: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    priority: int = 5,
+    not_before: datetime | None = None,
+    job_id: int | None = None,
+) -> bool:
+    """Idempotent task enqueue (skip if dedupe_key already pending/running)."""
+    stmt = (
+        pg_insert(FetchTask)
+        .values(
+            task_type=task_type,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            status="pending",
+            priority=priority,
+            not_before=not_before or func.now(),
+            job_id=job_id,
+        )
+        .on_conflict_do_nothing()
+    )
+    res = await session.execute(stmt)
+    return bool(res.rowcount)
+
+
+async def claim_tasks(
+    session: AsyncSession,
+    worker_id: str,
+    batch_size: int = 1,
+    lease_sec: int = 120,
+) -> list[FetchTask]:
+    """Atomic claim using FOR UPDATE SKIP LOCKED with lease duration."""
+    cte = (
+        select(FetchTask.id)
+        .where(FetchTask.status == "pending")
+        .where(FetchTask.not_before <= func.now())
+        .order_by(FetchTask.priority.asc(), FetchTask.id.asc())
+        .limit(batch_size)
+        .with_for_update(skip_locked=True)
+        .cte("claimable")
+    )
+
+    update_stmt = (
+        update(FetchTask)
+        .where(FetchTask.id.in_(select(cte.c.id)))
+        .values(
+            status="running",
+            locked_by=worker_id,
+            locked_until=func.now() + text(f"INTERVAL '{lease_sec} seconds'"),
+            attempts=FetchTask.attempts + 1,
+            updated_at=func.now(),
+        )
+        .returning(FetchTask)
+    )
+    result = await session.execute(update_stmt)
+    return list(result.scalars().all())
+
+
+async def complete_task(session: AsyncSession, task_id: int) -> None:
+    """Mark task as done and release lease."""
+    stmt = (
+        update(FetchTask)
+        .where(FetchTask.id == task_id)
+        .values(
+            status="done",
+            locked_until=None,
+            locked_by=None,
+            updated_at=func.now(),
+        )
+    )
+    await session.execute(stmt)
+
+
+async def fail_task(
+    session: AsyncSession,
+    task_id: int,
+    error_message: str,
+    backoff_sec: float = 60.0,
+    max_attempts: int = 6,
+) -> None:
+    """Record task failure with exponential backoff; mark dead if max attempts exceeded."""
+    task = await session.get(FetchTask, task_id)
+    if not task:
+        return
+    new_status = "dead" if task.attempts >= max_attempts else "pending"
+    not_before_expr = func.now() + text(f"INTERVAL '{int(backoff_sec)} seconds'")
+
+    stmt = (
+        update(FetchTask)
+        .where(FetchTask.id == task_id)
+        .values(
+            status=new_status,
+            last_error=error_message,
+            not_before=not_before_expr,
+            locked_until=None,
+            locked_by=None,
+            updated_at=func.now(),
+        )
+    )
+    await session.execute(stmt)
+
+
+async def reap_stale_leases(session: AsyncSession) -> int:
+    """Reap running tasks whose lease has expired back to pending."""
+    stmt = (
+        update(FetchTask)
+        .where(FetchTask.status == "running")
+        .where(FetchTask.locked_until < func.now())
+        .values(
+            status="pending",
+            locked_until=None,
+            locked_by=None,
+            updated_at=func.now(),
+        )
+    )
+    res = await session.execute(stmt)
+    return int(res.rowcount or 0)
+
+
+async def count_pending_tasks(session: AsyncSession) -> dict[str, int]:
+    """Return task counts by status."""
+    stmt = select(FetchTask.status, func.count()).group_by(FetchTask.status)
+    res = await session.execute(stmt)
+    return {str(row[0]): int(row[1]) for row in res.all()}
