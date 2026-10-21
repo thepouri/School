@@ -170,27 +170,28 @@ async def _snapshot_group_metrics(
         return
 
     if mode == "initial_only":
+        stmt = (
+            select(GroupMetric.group_id)
+            .where(GroupMetric.group_id.in_(group_ids))
+            .distinct()
+        )
+        res = await session.execute(stmt)
+        existing_gids = set(res.scalars().all())
+
         seen_gids: set[str] = set()
+        snapshots = []
         for row in rows:
             gid = row.get("id")
-            if not gid or gid in seen_gids:
+            if not gid or gid in existing_gids or gid in seen_gids:
                 continue
             seen_gids.add(gid)
-            insert_stmt = text("""
-                INSERT INTO skool.group_metrics (
-                    group_id, price_usd, total_members, total_online_members, total_posts,
-                    total_admins, total_rules, num_courses, num_modules, afl_percent, captured_at
-                )
-                SELECT :group_id, :price_usd, :total_members, :total_online_members, :total_posts,
-                       :total_admins, :total_rules, :num_courses, :num_modules, :afl_percent, NOW()
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM skool.group_metrics WHERE group_id = :group_id
-                )
-            """)
-            params = {"group_id": gid}
+            snapshot = {"group_id": gid}
             for field in _GROUP_METRIC_FIELDS:
-                params[field] = row.get(field)
-            await session.execute(insert_stmt, params)
+                snapshot[field] = row.get(field)
+            snapshots.append(snapshot)
+
+        if snapshots:
+            session.add_all([GroupMetric(**s) for s in snapshots])
         return
 
     if mode == "refresh":
