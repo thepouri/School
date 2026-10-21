@@ -16,12 +16,26 @@ FROM python:3.11-slim AS runner
 
 WORKDIR /app
 
-# Create non-root system user and group with UID/GID 10001
-RUN groupadd -g 10001 appgroup && \
-    useradd -u 10001 -g appgroup -s /bin/sh -m appuser
+# Environment for Playwright browser binaries
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 # Copy installed Python packages from builder stage
 COPY --from=builder /install /usr/local
+
+# Install Chromium & Linux OS dependencies for Playwright headless WAF solver
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && playwright install-deps chromium \
+    && playwright install chromium \
+    && mkdir -p /ms-playwright \
+    && chmod -R 777 /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root system user and group with UID/GID 10001
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup -s /bin/sh -m appuser
 
 # Copy application source code
 COPY skool/ ./skool/
@@ -30,8 +44,5 @@ COPY skool/ ./skool/
 RUN chown -R appuser:appgroup /app
 
 USER appuser
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
 
 CMD ["python", "-m", "skool.scheduler", "--daemon"]

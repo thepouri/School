@@ -152,6 +152,81 @@ async def ensure_scraper_schema(pool) -> None:
         except Exception:
             pass
 
+        # V2 additive columns and persistent queue tables
+        try:
+            await conn.execute("""
+                ALTER TABLE skool.groups
+                  ADD COLUMN IF NOT EXISTS detail_status      VARCHAR(16) NOT NULL DEFAULT 'pending',
+                  ADD COLUMN IF NOT EXISTS detail_attempts    INTEGER     NOT NULL DEFAULT 0,
+                  ADD COLUMN IF NOT EXISTS detail_last_error  TEXT,
+                  ADD COLUMN IF NOT EXISTS detail_fetched_at  TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS first_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  ADD COLUMN IF NOT EXISTS completeness       SMALLINT    NOT NULL DEFAULT 0;
+
+                ALTER TABLE skool.groups ALTER COLUMN detail_fetched SET DEFAULT false;
+
+                ALTER TABLE skool.users
+                  ADD COLUMN IF NOT EXISTS profile_status     VARCHAR(16) NOT NULL DEFAULT 'pending',
+                  ADD COLUMN IF NOT EXISTS profile_attempts   INTEGER     NOT NULL DEFAULT 0,
+                  ADD COLUMN IF NOT EXISTS profile_last_error TEXT,
+                  ADD COLUMN IF NOT EXISTS profile_fetched_at TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS first_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+                ALTER TABLE skool.users ALTER COLUMN groups_fetched SET DEFAULT false;
+
+                ALTER TABLE skool.user_groups
+                  ADD COLUMN IF NOT EXISTS source        VARCHAR(24),
+                  ADD COLUMN IF NOT EXISTS last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+                CREATE TABLE IF NOT EXISTS skool.fetch_tasks (
+                  id            BIGSERIAL PRIMARY KEY,
+                  task_type     VARCHAR(32)  NOT NULL,
+                  dedupe_key    VARCHAR(255) NOT NULL,
+                  payload       JSONB        NOT NULL DEFAULT '{}',
+                  status        VARCHAR(12)  NOT NULL DEFAULT 'pending',
+                  priority      SMALLINT     NOT NULL DEFAULT 5,
+                  attempts      INTEGER      NOT NULL DEFAULT 0,
+                  max_attempts  INTEGER      NOT NULL DEFAULT 6,
+                  not_before    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                  locked_until  TIMESTAMPTZ,
+                  locked_by     VARCHAR(64),
+                  last_error    TEXT,
+                  job_id        BIGINT REFERENCES skool.scraper_jobs(id) ON DELETE SET NULL,
+                  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_fetch_tasks_dedupe_active
+                  ON skool.fetch_tasks (dedupe_key) WHERE status IN ('pending','running');
+                CREATE INDEX IF NOT EXISTS ix_fetch_tasks_claim
+                  ON skool.fetch_tasks (priority, not_before) WHERE status = 'pending';
+
+                CREATE TABLE IF NOT EXISTS skool.discovery_queries (
+                  id            BIGSERIAL PRIMARY KEY,
+                  query_hash    CHAR(40)    NOT NULL UNIQUE,
+                  params        JSONB       NOT NULL,
+                  depth         SMALLINT    NOT NULL DEFAULT 0,
+                  pages_done    INTEGER     NOT NULL DEFAULT 0,
+                  total_results INTEGER,
+                  exhausted     BOOLEAN     NOT NULL DEFAULT FALSE,
+                  last_run_at   TIMESTAMPTZ,
+                  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS skool.raw_responses (
+                  id            BIGSERIAL PRIMARY KEY,
+                  url           TEXT        NOT NULL,
+                  status_code   INTEGER     NOT NULL,
+                  content_type  VARCHAR(64),
+                  headers       JSONB,
+                  body          TEXT,
+                  bytes_size    INTEGER,
+                  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+        except Exception as e:
+            logger.warning("[scraper] v2 schema bootstrap notice: %s", e)
+
         # Bidirectional healing for groups with owner info but missing in skool.users
         try:
             await conn.execute("""
