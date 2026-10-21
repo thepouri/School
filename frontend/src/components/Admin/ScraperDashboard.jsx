@@ -20,6 +20,8 @@ import {
   Users,
   X,
   XCircle,
+  Wrench,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   useScraperStatus,
@@ -728,7 +730,7 @@ export default function ScraperDashboard() {
           )}
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {/* Button 1: Trigger Refresh Now */}
           <button
             type="button"
@@ -804,6 +806,58 @@ export default function ScraperDashboard() {
             </div>
             {activeTriggerMode === 'missing_owners' && triggerJob.isPending && (
               <span className="text-xs font-semibold text-indigo-600">Queuing…</span>
+            )}
+          </button>
+
+          {/* Button 4: Trigger Self-Healing Repair */}
+          <button
+            type="button"
+            disabled={triggerJob.isPending || activeJob != null}
+            onClick={() => handleTrigger('repair')}
+            className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-50/80 p-3.5 text-left transition-all hover:border-emerald-300 hover:bg-emerald-50/40 disabled:opacity-50"
+          >
+            <div>
+              <div className="flex items-center gap-2">
+                <Wrench
+                  size={16}
+                  className={`text-emerald-600 ${
+                    activeTriggerMode === 'repair' && triggerJob.isPending ? 'animate-spin' : ''
+                  }`}
+                />
+                <span className="text-sm font-bold text-stone-900">Trigger Self-Healing Repair</span>
+              </div>
+              <p className="mt-1 text-xs text-stone-500">
+                Audit completeness, heal missing stubs &amp; drain queue
+              </p>
+            </div>
+            {activeTriggerMode === 'repair' && triggerJob.isPending && (
+              <span className="text-xs font-semibold text-emerald-600">Queuing…</span>
+            )}
+          </button>
+
+          {/* Button 5: Run Database Health Audit */}
+          <button
+            type="button"
+            disabled={triggerJob.isPending || activeJob != null}
+            onClick={() => handleTrigger('audit')}
+            className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-50/80 p-3.5 text-left transition-all hover:border-cyan-300 hover:bg-cyan-50/40 disabled:opacity-50"
+          >
+            <div>
+              <div className="flex items-center gap-2">
+                <ShieldCheck
+                  size={16}
+                  className={`text-cyan-600 ${
+                    activeTriggerMode === 'audit' && triggerJob.isPending ? 'animate-spin' : ''
+                  }`}
+                />
+                <span className="text-sm font-bold text-stone-900">Run Health Audit</span>
+              </div>
+              <p className="mt-1 text-xs text-stone-500">
+                Run 6 integrity checks &amp; stream report to live console
+              </p>
+            </div>
+            {activeTriggerMode === 'audit' && triggerJob.isPending && (
+              <span className="text-xs font-semibold text-cyan-600">Queuing…</span>
             )}
           </button>
         </div>

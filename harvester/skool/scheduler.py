@@ -471,6 +471,34 @@ class HarvesterScheduler:
                 "--min-delay",
                 f"{delay_s:.3f}",
             ]
+        elif mode == "repair":
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "repair",
+                "--workers",
+                str(detail_conc if detail_conc > 0 else 4),
+            ]
+        elif mode == "audit":
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "audit",
+            ]
+        elif mode in ("run_all", "run-all"):
+            return [
+                py,
+                "-m",
+                "skool.main",
+                "--mode",
+                "run-all",
+                "--workers",
+                str(detail_conc if detail_conc > 0 else 4),
+            ]
         else:
             return [
                 py,

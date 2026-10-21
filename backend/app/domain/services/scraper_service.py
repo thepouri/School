@@ -3,7 +3,7 @@ from typing import Any
 
 from app.ports.repositories import ScraperRepository
 
-VALID_MODES = {"refresh", "discovery", "all", "missing_owners"}
+VALID_MODES = {"refresh", "discovery", "all", "missing_owners", "repair", "audit", "run_all", "run-all"}
 
 
 class ScraperService:

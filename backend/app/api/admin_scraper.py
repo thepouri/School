@@ -32,7 +32,7 @@ async def get_status(request: Request):
 
 
 class TriggerBody(BaseModel):
-    mode: str = Field(..., description="Job execution mode: refresh, discovery, all, or missing_owners")
+    mode: str = Field(..., description="Job execution mode: refresh, discovery, all, missing_owners, repair, or audit")
 
 
 @router.post("/trigger")
