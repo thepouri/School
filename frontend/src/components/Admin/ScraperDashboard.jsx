@@ -141,6 +141,7 @@ export default function ScraperDashboard() {
   const [refreshDays, setRefreshDays] = useState(3);
   const [discoveryDays, setDiscoveryDays] = useState(7);
   const [isPaused, setIsPaused] = useState(false);
+  const [executionMode, setExecutionMode] = useState('parallel');
   const [discoveryMode, setDiscoveryMode] = useState('all');
   const [pageConcurrency, setPageConcurrency] = useState(4);
   const [detailConcurrency, setDetailConcurrency] = useState(8);
@@ -159,6 +160,9 @@ export default function ScraperDashboard() {
       }
       if (settingsData.is_paused != null) {
         setIsPaused(Boolean(settingsData.is_paused));
+      }
+      if (settingsData.execution_mode != null) {
+        setExecutionMode(settingsData.execution_mode);
       }
       if (settingsData.discovery_mode != null) {
         setDiscoveryMode(settingsData.discovery_mode);
@@ -219,6 +223,7 @@ export default function ScraperDashboard() {
         refresh_interval_days: Number(refreshDays),
         discovery_interval_days: Number(discoveryDays),
         is_paused: Boolean(isPaused),
+        execution_mode: String(executionMode),
         discovery_mode: String(discoveryMode),
         page_concurrency: Number(pageConcurrency),
         detail_concurrency: Number(detailConcurrency),
@@ -1090,6 +1095,23 @@ export default function ScraperDashboard() {
                 onChange={(e) => setDiscoveryDays(e.target.value)}
                 className="mt-2 h-10 w-full rounded-lg border border-stone-200 px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700">
+                Execution Mode
+              </label>
+              <p className="mt-0.5 text-[11px] text-stone-400">
+                Parallel (high throughput) or Sequential (one-by-one safe).
+              </p>
+              <select
+                value={executionMode}
+                onChange={(e) => setExecutionMode(e.target.value)}
+                className="mt-2 h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+              >
+                <option value="parallel">Parallel (Multi-worker Concurrency)</option>
+                <option value="sequential">Sequential (Single Worker - 1 Page at a time)</option>
+              </select>
             </div>
 
             <div>

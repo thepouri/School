@@ -237,6 +237,9 @@ class ScraperSettings(Base):
     is_paused: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false")
     )
+    execution_mode: Mapped[str] = mapped_column(
+        String(32), default="parallel", server_default=text("'parallel'")
+    )
     discovery_mode: Mapped[str] = mapped_column(
         String(32), default="all", server_default=text("'all'")
     )

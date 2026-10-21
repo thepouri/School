@@ -130,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--build-id", default=None, help="manual buildId (optional)")
 
+    parser.add_argument("--execution-mode", choices=["parallel", "sequential"], default="parallel", help="execution mode for discovery passes")
     parser.add_argument("--page-concurrency", type=int, default=4)
     parser.add_argument("--detail-concurrency", type=int, default=8)
     parser.add_argument(
@@ -310,7 +311,7 @@ async def run(args: argparse.Namespace) -> None:
             await pipeline.run_search(
                 queries=args.queries or default_query_plan(include_bigrams=args.include_bigrams),
                 languages=search_languages,
-                with_details=args.search_users and not args.no_details,
+                with_details=not args.no_details,
             )
 
         if args.mode in ("details", "all"):

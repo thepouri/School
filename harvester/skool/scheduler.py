@@ -373,6 +373,10 @@ class HarvesterScheduler:
         delay_ms = self.settings.get("request_delay_ms", 300)
         delay_s = max(0.0, float(delay_ms) / 1000.0)
         include_bigrams = bool(self.settings.get("include_bigrams", False))
+        exec_mode = str(self.settings.get("execution_mode", "parallel")).lower()
+        if exec_mode == "sequential":
+            page_conc = 1
+            detail_conc = 1
         disc_mode = str(self.settings.get("discovery_mode", "all")).lower()
         if disc_mode not in ("all", "browse", "search", "quick"):
             disc_mode = "all"

@@ -213,7 +213,7 @@ class Pipeline:
             return []
 
         async with session_scope() as session:
-            written = await repo.upsert_groups(session, list(rows.values()))
+            written = await repo.upsert_groups(session, list(rows.values()), snapshot_mode="none")
         self.stats.groups_written += written
         log.info("  ✓ %s base groups written/updated", written)
         return [(row["id"], row["name"]) for row in rows.values()]

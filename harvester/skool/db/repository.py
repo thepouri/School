@@ -170,27 +170,27 @@ async def _snapshot_group_metrics(
         return
 
     if mode == "initial_only":
-        stmt = (
-            select(GroupMetric.group_id)
-            .where(GroupMetric.group_id.in_(group_ids))
-            .distinct()
-        )
-        res = await session.execute(stmt)
-        existing_with_metrics = set(res.scalars().all())
-
-        snapshots = []
+        seen_gids: set[str] = set()
         for row in rows:
             gid = row.get("id")
-            if not gid or gid in existing_with_metrics:
+            if not gid or gid in seen_gids:
                 continue
-            snapshot = {"group_id": gid}
+            seen_gids.add(gid)
+            insert_stmt = text("""
+                INSERT INTO skool.group_metrics (
+                    group_id, price_usd, total_members, total_online_members, total_posts,
+                    total_admins, total_rules, num_courses, num_modules, afl_percent, captured_at
+                )
+                SELECT :group_id, :price_usd, :total_members, :total_online_members, :total_posts,
+                       :total_admins, :total_rules, :num_courses, :num_modules, :afl_percent, NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM skool.group_metrics WHERE group_id = :group_id
+                )
+            """)
+            params = {"group_id": gid}
             for field in _GROUP_METRIC_FIELDS:
-                value = row.get(field)
-                snapshot[field] = value if value is not None else None
-            snapshots.append(snapshot)
-
-        if snapshots:
-            session.add_all([GroupMetric(**s) for s in snapshots])
+                params[field] = row.get(field)
+            await session.execute(insert_stmt, params)
         return
 
     if mode == "refresh":
@@ -287,7 +287,7 @@ async def _snapshot_user_metrics(
 async def upsert_groups(
     session: AsyncSession,
     rows: Sequence[dict[str, Any]],
-    snapshot_mode: str = "initial_only",
+    snapshot_mode: str = "none",
 ) -> int:
     rows = [row for row in rows if row and row.get("id") and row.get("name")]
     if not rows:
@@ -773,10 +773,10 @@ async def update_daemon_heartbeat(session: AsyncSession) -> None:
         """
         INSERT INTO skool.scraper_settings (
             id, refresh_interval_days, discovery_interval_days, refresh_cron, discovery_cron, is_paused,
-            discovery_mode, page_concurrency, detail_concurrency, request_delay_ms, include_bigrams,
+            execution_mode, discovery_mode, page_concurrency, detail_concurrency, request_delay_ms, include_bigrams,
             daemon_heartbeat_at, updated_at
         )
-        VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, 'all', 4, 8, 300, false, NOW(), NOW())
+        VALUES (1, 3, 7, '0 2 */3 * *', '0 3 * * 0', false, 'parallel', 'all', 4, 8, 300, false, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET daemon_heartbeat_at = NOW()
         """
     )
@@ -791,6 +791,7 @@ async def get_scraper_settings(session: AsyncSession) -> dict[str, Any] | None:
         ScraperSettings.refresh_cron,
         ScraperSettings.discovery_cron,
         ScraperSettings.is_paused,
+        ScraperSettings.execution_mode,
         ScraperSettings.discovery_mode,
         ScraperSettings.page_concurrency,
         ScraperSettings.detail_concurrency,
@@ -807,11 +808,12 @@ async def get_scraper_settings(session: AsyncSession) -> dict[str, Any] | None:
         "refresh_cron": str(row[2]),
         "discovery_cron": str(row[3]),
         "is_paused": bool(row[4]),
-        "discovery_mode": str(row[5] or "all"),
-        "page_concurrency": int(row[6] or 4),
-        "detail_concurrency": int(row[7] or 8),
-        "request_delay_ms": int(row[8] if row[8] is not None else 300),
-        "include_bigrams": bool(row[9] if row[9] is not None else False),
+        "execution_mode": str(row[5] or "parallel"),
+        "discovery_mode": str(row[6] or "all"),
+        "page_concurrency": int(row[7] or 4),
+        "detail_concurrency": int(row[8] or 8),
+        "request_delay_ms": int(row[9] if row[9] is not None else 300),
+        "include_bigrams": bool(row[10] if row[10] is not None else False),
     }
 
 
