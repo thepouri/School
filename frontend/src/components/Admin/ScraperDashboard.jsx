@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Activity,
   AlertCircle,
@@ -187,9 +187,21 @@ export default function ScraperDashboard() {
   const [activeTriggerMode, setActiveTriggerMode] = useState(null);
 
   // Modal / drawer terminal console state
-  const [selectedJob, setSelectedJob] = useState(null);
+  const [selectedJobId, setSelectedJobId] = useState(null);
   const [copiedLogs, setCopiedLogs] = useState(false);
   const [logFilter, setLogFilter] = useState('all'); // 'all' | 'errors'
+  const [autoScroll, setAutoScroll] = useState(true);
+  const logContainerRef = useRef(null);
+
+  // Poll logs for the currently inspected job every 2 seconds
+  const {
+    data: activeJobLogsData,
+    isFetching: jobLogsFetching,
+    refetch: refetchJobLogs,
+  } = useScraperLogs(300, selectedJobId, {
+    enabled: Boolean(selectedJobId),
+    refetchInterval: selectedJobId ? 2000 : false,
+  });
 
   const handleTrigger = (mode) => {
     setActiveTriggerMode(mode);
@@ -268,8 +280,8 @@ export default function ScraperDashboard() {
           type: 'success',
           message: `Job #${jobId} cancellation requested successfully.`,
         });
-        if (selectedJob && selectedJob.id === jobId) {
-          setSelectedJob((prev) => ({ ...prev, status: 'CANCELLED' }));
+        if (selectedJobId === jobId) {
+          refetchJobLogs();
         }
       },
       onError: (err) => {
@@ -334,6 +346,17 @@ export default function ScraperDashboard() {
   const activeJob = status?.active_job;
 
   const pastJobs = logsData?.items || [];
+  const selectedJob = selectedJobId
+    ? (activeJobLogsData?.items?.[0] ||
+        pastJobs.find((j) => j.id === selectedJobId) ||
+        (activeJob?.id === selectedJobId ? activeJob : null))
+    : null;
+
+  useEffect(() => {
+    if (autoScroll && logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [selectedJob?.lines?.length, autoScroll]);
 
   return (
     <div className="space-y-6">
@@ -642,6 +665,14 @@ export default function ScraperDashboard() {
               </span>
               <button
                 type="button"
+                onClick={() => setSelectedJobId(activeJob.id)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-brand-300 bg-white px-3 py-1 text-xs font-bold text-brand-800 shadow-xs hover:bg-brand-50 hover:border-brand-400 transition-colors"
+              >
+                <Terminal size={13} />
+                Live Console
+              </button>
+              <button
+                type="button"
                 disabled={cancelJob.isPending}
                 onClick={() => handleCancelJob(activeJob.id)}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-red-50 px-3 py-1 text-xs font-bold text-red-700 shadow-xs hover:bg-red-100 hover:border-red-400 transition-colors disabled:opacity-50"
@@ -894,7 +925,7 @@ export default function ScraperDashboard() {
                         )}
                         <button
                           type="button"
-                          onClick={() => setSelectedJob(job)}
+                          onClick={() => setSelectedJobId(job.id)}
                           className="inline-flex items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 shadow-sm transition-colors hover:border-stone-300 hover:bg-stone-50"
                         >
                           <Terminal size={13} />
@@ -1240,12 +1271,12 @@ export default function ScraperDashboard() {
 
       {/* 6. MODAL TERMINAL CONSOLE DRAWER */}
       {selectedJob && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
-          <div className="relative flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl border border-stone-800 bg-stone-950 p-6 text-stone-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="relative flex h-[92vh] max-h-[94vh] w-[98vw] max-w-7xl flex-col rounded-2xl border border-stone-800 bg-stone-950 p-5 sm:p-6 text-stone-100 shadow-2xl">
             {/* Modal Header */}
-            <div className="flex items-start justify-between border-b border-stone-800 pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-800 pb-4">
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Terminal size={18} className="text-brand-400" />
                   <h3 className="font-mono text-base font-bold text-white">
                     Job #{selectedJob.id} Output Console
@@ -1256,11 +1287,19 @@ export default function ScraperDashboard() {
                         ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
                         : selectedJob.status === 'FAILED'
                         ? 'bg-red-950 text-red-400 border border-red-800'
-                        : 'bg-blue-950 text-blue-400 border border-blue-800'
+                        : selectedJob.status === 'RUNNING'
+                        ? 'bg-blue-950 text-blue-400 border border-blue-800 animate-pulse'
+                        : 'bg-stone-900 text-stone-400 border border-stone-700'
                     }`}
                   >
                     {selectedJob.status}
                   </span>
+                  {(selectedJob.status === 'RUNNING' || selectedJob.status === 'PENDING') && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-950/80 border border-emerald-700 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+                      Live Updating (2s)
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1 font-mono text-xs text-stone-400">
                   Mode: <span className="text-stone-200">{selectedJob.job_type}</span> ·
@@ -1271,7 +1310,28 @@ export default function ScraperDashboard() {
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAutoScroll((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                    autoScroll
+                      ? 'border-brand-600 bg-brand-950 text-brand-300'
+                      : 'border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200'
+                  }`}
+                  title="Toggle auto-scroll to latest log entries"
+                >
+                  Auto-scroll: {autoScroll ? 'ON' : 'OFF'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => refetchJobLogs()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-900 px-2.5 py-1 text-xs font-medium text-stone-300 hover:bg-stone-800"
+                  title="Refresh logs immediately"
+                >
+                  <RefreshCw size={13} className={jobLogsFetching ? 'animate-spin text-brand-400' : ''} />
+                  Refresh
+                </button>
                 {(selectedJob.status === 'RUNNING' || selectedJob.status === 'PENDING') && (
                   <button
                     type="button"
@@ -1293,7 +1353,7 @@ export default function ScraperDashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedJob(null)}
+                  onClick={() => setSelectedJobId(null)}
                   className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-800 hover:text-white"
                 >
                   <X size={18} />
@@ -1309,11 +1369,14 @@ export default function ScraperDashboard() {
               </div>
             )}
 
-            {/* Terminal Lines */}
-            <div className="mt-4 flex-1 overflow-y-auto rounded-xl border border-stone-800 bg-black/80 p-4 font-mono text-xs leading-relaxed text-stone-300">
+            {/* Terminal Lines Container */}
+            <div
+              ref={logContainerRef}
+              className="mt-4 flex-1 overflow-y-auto rounded-xl border border-stone-800 bg-black/90 p-4 font-mono text-xs leading-relaxed text-stone-300 select-text"
+            >
               {(!selectedJob.lines || selectedJob.lines.length === 0) ? (
-                <div className="py-8 text-center text-stone-500">
-                  {selectedJob.error_message ? '[No stdout stream lines recorded. See error message above]' : '[No output logged for this job execution]'}
+                <div className="py-12 text-center text-stone-500">
+                  {selectedJob.error_message ? '[No stdout stream lines recorded. See error message above]' : '[No output logged for this job execution yet - waiting for live worker output...]'}
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -1324,7 +1387,7 @@ export default function ScraperDashboard() {
                     return (
                       <div
                         key={line.id || idx}
-                        className={`flex items-start gap-2 ${
+                        className={`flex items-start gap-2.5 font-mono ${
                           isErr ? 'text-red-400' : isWarn ? 'text-amber-300' : 'text-stone-300'
                         }`}
                       >
@@ -1332,11 +1395,11 @@ export default function ScraperDashboard() {
                           {formatTimestamp(line.created_at)}
                         </span>
                         <span
-                          className={`shrink-0 rounded px-1 py-0.2 text-[10px] font-bold ${
+                          className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] font-bold ${
                             isErr
-                              ? 'bg-red-900/50 text-red-300'
+                              ? 'bg-red-900/50 text-red-300 border border-red-800/60'
                               : isWarn
-                              ? 'bg-amber-900/50 text-amber-300'
+                              ? 'bg-amber-900/50 text-amber-300 border border-amber-800/60'
                               : 'bg-stone-800 text-stone-400'
                           }`}
                         >
@@ -1354,10 +1417,18 @@ export default function ScraperDashboard() {
 
             {/* Modal Footer */}
             <div className="mt-4 flex items-center justify-between text-xs text-stone-500 border-t border-stone-800 pt-3">
-              <span>{selectedJob.lines?.length || 0} log events recorded</span>
+              <div className="flex items-center gap-3">
+                <span>{selectedJob.lines?.length || 0} log events recorded</span>
+                {jobLogsFetching && (
+                  <span className="flex items-center gap-1.5 text-stone-400">
+                    <RefreshCw size={11} className="animate-spin text-brand-400" />
+                    Syncing live logs…
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
-                onClick={() => setSelectedJob(null)}
+                onClick={() => setSelectedJobId(null)}
                 className="rounded-lg bg-stone-800 px-3 py-1.5 text-xs font-semibold text-stone-200 hover:bg-stone-700"
               >
                 Close Console

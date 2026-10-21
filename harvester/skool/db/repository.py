@@ -347,13 +347,13 @@ async def upsert_groups(
                 if r.get("owner_id") and r.get("owner_name")
             ]
             if owner_stubs:
-                owner_stubs = _normalize(_dedupe(_project(owner_stubs, USER_COLUMNS), "id"))
+                owner_stubs = _normalize(_dedupe(_dedupe(_project(owner_stubs, USER_COLUMNS), "id"), "name"))
                 owner_stubs.sort(key=lambda u: str(u["id"]))
                 if owner_stubs:
                     u_stmt = (
                         pg_insert(User)
                         .values(owner_stubs)
-                        .on_conflict_do_nothing(index_elements=[User.id])
+                        .on_conflict_do_nothing()
                     )
                     await session.execute(u_stmt)
 
@@ -405,6 +405,48 @@ async def upsert_user(session: AsyncSession, row: dict[str, Any]) -> None:
     if not row or not row.get("id") or not row.get("name"):
         return
     clean = _project([row], USER_COLUMNS)[0]
+    uid = str(clean["id"])
+    uname = str(clean["name"])
+
+    # If another user record exists with this username under a different ID,
+    # re-link foreign records and remove the stale record to avoid violating ix_skool_users_name.
+    res = await session.execute(
+        select(User.id).where(User.name == uname).where(User.id != uid)
+    )
+    conflicting_ids = res.scalars().all()
+    if conflicting_ids:
+        for old_id in conflicting_ids:
+            # 1. Update groups pointing to old_id
+            await session.execute(
+                text("UPDATE skool.groups SET owner_id = :uid WHERE owner_id = :old_id"),
+                {"uid": uid, "old_id": old_id},
+            )
+            # 2. Re-link user_groups (avoiding PK conflict on (user_id, group_id))
+            await session.execute(
+                text("""
+                    INSERT INTO skool.user_groups (user_id, group_id, role, scraped_at)
+                    SELECT :uid, group_id, role, scraped_at
+                    FROM skool.user_groups
+                    WHERE user_id = :old_id
+                    ON CONFLICT (user_id, group_id) DO NOTHING
+                """),
+                {"uid": uid, "old_id": old_id},
+            )
+            await session.execute(
+                text("DELETE FROM skool.user_groups WHERE user_id = :old_id"),
+                {"old_id": old_id},
+            )
+            # 3. User metrics
+            await session.execute(
+                text("UPDATE skool.user_metrics SET user_id = :uid WHERE user_id = :old_id"),
+                {"uid": uid, "old_id": old_id},
+            )
+            # 4. Delete the stale conflicting user record
+            await session.execute(
+                text("DELETE FROM skool.users WHERE id = :old_id"),
+                {"old_id": old_id},
+            )
+
     stmt = pg_insert(User).values(**clean)
     updates = _build_set(
         User, list(clean.keys()), stmt.excluded, USER_KEEP_FIRST, USER_IMMUTABLE
@@ -441,7 +483,7 @@ async def insert_missing_users(
         stmt = (
             pg_insert(User)
             .values(chunk)
-            .on_conflict_do_nothing(index_elements=[User.id])
+            .on_conflict_do_nothing()
         )
         result = await session.execute(stmt)
         # only the actually-inserted rows get a history entry (skipped ones
@@ -738,12 +780,15 @@ async def heal_missing_owners_internally(session: AsyncSession) -> int:
     stmt2 = text(
         """
         INSERT INTO skool.users (id, name, full_name, created_at, updated_at)
-        SELECT DISTINCT g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
+        SELECT DISTINCT ON (g.owner_name) g.owner_id, g.owner_name, g.owner_name, NOW(), NOW()
         FROM skool.groups g
         WHERE g.owner_id IS NOT NULL 
           AND g.owner_name IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM skool.users u WHERE u.id = g.owner_id)
-        ON CONFLICT (id) DO NOTHING
+          AND NOT EXISTS (
+              SELECT 1 FROM skool.users u WHERE u.id = g.owner_id OR u.name = g.owner_name
+          )
+        ORDER BY g.owner_name, g.owner_id
+        ON CONFLICT DO NOTHING
         """
     )
     res2 = await session.execute(stmt2)

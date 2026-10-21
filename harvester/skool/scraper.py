@@ -45,9 +45,9 @@ USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 )
 
-# Cooldown steps for consecutive 403s (seconds). With multiple proxies each
-# rate-limit jumps to the next proxy and the cooldown is only for the last hop.
-COOLDOWN_STEPS = (60, 120, 300, 600)
+# Cooldown interval when rate-limited or blocked (5 minutes = 300 seconds every time).
+BLOCK_COOLDOWN_SECONDS = 300
+COOLDOWN_STEPS = (300, 300, 300, 300, 300, 300, 300, 300, 300, 300)
 
 
 class SkoolClient:
@@ -335,12 +335,12 @@ class SkoolClient:
             if not self._gate.is_set():  # someone else got here first
                 await self._gate.wait()
                 return
-            seconds = COOLDOWN_STEPS[min(self._cool_level, len(COOLDOWN_STEPS) - 1)]
+            seconds = BLOCK_COOLDOWN_SECONDS
             self._cool_level += 1
             self.stats["cooldowns"] += 1
             self._gate.clear()
             log.warning(
-                "Persistent 403 — IP rate-limited. Whole pipeline stops for %s seconds",
+                "Rate-limited / blocked (403/429). Whole pipeline paused for %s seconds (5 minutes)...",
                 seconds,
             )
             try:
@@ -473,7 +473,8 @@ class SkoolClient:
                     await self._ensure_waf_token(force=True)
                     attempt -= 1
                     continue
-                if self._mark_failure("ratelimit"):
+                wrapped = self._mark_failure("ratelimit")
+                if wrapped or not (self._proxies and self._proxies.has_backup()):
                     await self._cool_down()
                 attempt -= 1
                 continue

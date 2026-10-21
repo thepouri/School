@@ -45,8 +45,8 @@ export function useScraperLogs(limit = 50, jobId = null, options = {}) {
   return useQuery({
     queryKey: ['admin-scraper-logs', limit, jobId],
     queryFn: () => request(`/api/admin/scraper/logs${query}`),
-    refetchInterval: 10000,
-    staleTime: 5000,
+    refetchInterval: 3000,
+    staleTime: 1500,
     ...options,
   });
 }
