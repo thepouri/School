@@ -52,6 +52,8 @@ services:
       PG_DATABASE: ${POSTGRES_DB:-skool}
       PGDATABASE: ${POSTGRES_DB:-skool}
       PORT: 3001
+      POOL_MAX: ${POOL_MAX:-5}
+      STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-30000}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-skool_production_secret_key_change_me_to_a_random_48_char_string}
       JWT_SECRET: ${JWT_SECRET:-skool_production_secret_key_change_me_to_a_random_48_char_string}
       AUTH_TOKEN_DAYS: ${AUTH_TOKEN_DAYS:-7}

@@ -276,8 +276,13 @@ class PgScraperRepository:
             logs_rows = await conn.fetch(
                 """
                 SELECT id, job_id, level, message, created_at
-                FROM skool.scraper_logs
-                WHERE job_id = ANY($1::bigint[])
+                FROM (
+                    SELECT id, job_id, level, message, created_at
+                    FROM skool.scraper_logs
+                    WHERE job_id = ANY($1::bigint[])
+                    ORDER BY id DESC
+                    LIMIT 2000
+                ) sub
                 ORDER BY id ASC
                 """,
                 job_ids,

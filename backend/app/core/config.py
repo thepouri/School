@@ -15,9 +15,9 @@ class Settings(BaseSettings):
     port: int = 3001
 
     # Pool settings replicated from server/src/db.js
-    pool_max: int = 10
+    pool_max: int = 5
     pool_idle_timeout_s: int = 30
-    statement_timeout_ms: int = 8000
+    statement_timeout_ms: int = 30000
 
     meta_cache_ttl_s: int = 300
     analytics_cache_ttl_s: int = 120
