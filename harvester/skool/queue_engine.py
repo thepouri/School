@@ -43,7 +43,7 @@ class TaskWorkerPool:
         build_id_manager: BuildIdManager,
         limiter: AdaptiveLimiter,
         circuit_breaker: CircuitBreaker,
-        concurrency: int = 12,
+        concurrency: int = 2,
         lease_sec: int = 120,
         worker_prefix: str = "worker",
     ) -> None:

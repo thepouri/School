@@ -59,9 +59,9 @@ class ScraperService:
             "discovery_interval_days": settings.get("discovery_interval_days", 7),
             "is_paused": settings.get("is_paused", False),
             "discovery_mode": settings.get("discovery_mode", "all"),
-            "page_concurrency": settings.get("page_concurrency", 4),
-            "detail_concurrency": settings.get("detail_concurrency", 8),
-            "request_delay_ms": settings.get("request_delay_ms", 300),
+            "page_concurrency": settings.get("page_concurrency", 1),
+            "detail_concurrency": settings.get("detail_concurrency", 2),
+            "request_delay_ms": settings.get("request_delay_ms", 800),
             "include_bigrams": settings.get("include_bigrams", False),
         }
 

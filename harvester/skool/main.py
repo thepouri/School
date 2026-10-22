@@ -136,11 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-id", default=None, help="manual buildId (optional)")
 
     parser.add_argument("--execution-mode", choices=["parallel", "sequential"], default="parallel", help="execution mode for discovery passes")
-    parser.add_argument("--page-concurrency", type=int, default=4)
-    parser.add_argument("--detail-concurrency", type=int, default=8)
-    parser.add_argument("--workers", type=int, default=12, help="concurrency for v2 queue worker pool (default: 12)")
-    parser.add_argument("--start-rps", type=float, default=3.0, help="initial target RPS for AdaptiveLimiter (default: 3.0)")
-    parser.add_argument("--max-rps", type=float, default=8.0, help="maximum RPS ceiling (default: 8.0)")
+    parser.add_argument("--page-concurrency", type=int, default=1)
+    parser.add_argument("--detail-concurrency", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=2, help="concurrency for v2 queue worker pool (default: 12)")
+    parser.add_argument("--start-rps", type=float, default=1.0, help="initial target RPS for AdaptiveLimiter (default: 3.0)")
+    parser.add_argument("--max-rps", type=float, default=2.0, help="maximum RPS ceiling (default: 8.0)")
     parser.add_argument("--min-rps", type=float, default=0.5, help="minimum RPS floor (default: 0.5)")
     parser.add_argument(
         "--include-bigrams",
@@ -149,12 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="include 676 exhaustive two-letter bigram combinations in search queries",
     )
     parser.add_argument("--max-pages", type=int, default=34)
-    parser.add_argument("--min-delay", type=float, default=0.3)
+    parser.add_argument("--min-delay", type=float, default=0.8)
     parser.add_argument("--max-delay", type=float, default=1.0)
     parser.add_argument(
         "--pace",
         type=float,
-        default=0.0,
+        default=0.8,
         help="minimum interval between any two requests across the whole app (anti-403)",
     )
     parser.add_argument("--log-level", default="INFO")

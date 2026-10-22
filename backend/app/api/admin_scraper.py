@@ -70,9 +70,9 @@ class SettingsBody(BaseModel):
     discovery_interval_days: int = Field(..., gt=0, le=3650, description="Interval in days between discovery runs")
     is_paused: bool = Field(False, description="Pause all automatic scraping schedules")
     discovery_mode: str | None = Field("all", description="Discovery strategy: all, browse, search, or quick")
-    page_concurrency: int | None = Field(4, ge=1, le=16, description="Parallel page requests per slice (1=sequential, 4=parallel)")
-    detail_concurrency: int | None = Field(8, ge=1, le=24, description="Parallel detail about.json requests")
-    request_delay_ms: int | None = Field(300, ge=0, le=5000, description="Pace/delay between requests in milliseconds")
+    page_concurrency: int | None = Field(1, ge=1, le=16, description="Parallel page requests per slice (1=sequential, 4=parallel)")
+    detail_concurrency: int | None = Field(2, ge=1, le=24, description="Parallel detail about.json requests")
+    request_delay_ms: int | None = Field(800, ge=0, le=5000, description="Pace/delay between requests in milliseconds")
     include_bigrams: bool | None = Field(False, description="Include exhaustive 2-letter combos in search query plan")
 
 

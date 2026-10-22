@@ -368,9 +368,9 @@ class HarvesterScheduler:
 
         # Extract active settings with safe defaults
         ref_days = self.settings.get("refresh_interval_days", 3)
-        page_conc = self.settings.get("page_concurrency", 4)
-        detail_conc = self.settings.get("detail_concurrency", 8)
-        delay_ms = self.settings.get("request_delay_ms", 300)
+        page_conc = self.settings.get("page_concurrency", 1)
+        detail_conc = self.settings.get("detail_concurrency", 2)
+        delay_ms = self.settings.get("request_delay_ms", 800)
         delay_s = max(0.0, float(delay_ms) / 1000.0)
         include_bigrams = bool(self.settings.get("include_bigrams", False))
         exec_mode = str(self.settings.get("execution_mode", "parallel")).lower()
@@ -479,7 +479,7 @@ class HarvesterScheduler:
                 "--mode",
                 "repair",
                 "--workers",
-                str(detail_conc if detail_conc > 0 else 4),
+                str(detail_conc if detail_conc > 0 else 2),
             ]
         elif mode == "audit":
             return [
@@ -497,7 +497,7 @@ class HarvesterScheduler:
                 "--mode",
                 "run-all",
                 "--workers",
-                str(detail_conc if detail_conc > 0 else 4),
+                str(detail_conc if detail_conc > 0 else 2),
             ]
         else:
             return [
