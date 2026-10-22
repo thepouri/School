@@ -399,6 +399,7 @@ async def upsert_groups(
                 await session.execute(ug_stmt)
 
         written += len(chunk)
+        await session.commit()
     return written
 
 
@@ -515,6 +516,7 @@ async def insert_missing_users(
         inserted = result.rowcount if result.rowcount is not None else 0
         if inserted:
             await _snapshot_user_metrics(session, chunk[:inserted])
+        await session.commit()
     return len(rows)
 
 
@@ -538,6 +540,7 @@ async def link_user_groups(
     ]
     if not rows:
         return
+    rows.sort(key=lambda x: (str(x["user_id"]), str(x["group_id"])))
     ug_columns = [column.key for column in UserGroup.__table__.columns]
     for chunk in _batches(rows, columns=ug_columns):
         if role == "owner":
@@ -569,6 +572,7 @@ async def link_user_groups(
                 )
             )
         await session.execute(stmt)
+        await session.commit()
 
 
 async def mark_detail_fetched(session: AsyncSession, group_ids: Sequence[str]) -> None:

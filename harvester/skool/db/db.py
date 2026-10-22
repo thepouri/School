@@ -26,12 +26,28 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://pouri:pouri@localhost:5432/pouri",
 )
 
+import asyncio
+import logging
+import time
+
+log = logging.getLogger("skool.db")
+
+POOL_SIZE = int(os.getenv("HARVESTER_DB_POOL_SIZE", "3"))
+MAX_OVERFLOW = int(os.getenv("HARVESTER_DB_MAX_OVERFLOW", "2"))
+LONG_TRANSACTION_THRESHOLD_S = float(os.getenv("LONG_TX_THRESHOLD_S", "10.0"))
+
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
     pool_pre_ping=True,
+    connect_args={
+        "server_settings": {
+            "idle_in_transaction_session_timeout": "30000",
+            "statement_timeout": "30000",
+        }
+    },
 )
 
 SessionMaker = async_sessionmaker(
@@ -46,18 +62,32 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema=SCHEMA)
 
 
+# Concurrency semaphore to bound active DB transactions
+_DB_CONCURRENCY_LIMIT = int(os.getenv("DB_MAX_CONCURRENT_SESSIONS", "5"))
+_db_semaphore = asyncio.Semaphore(_DB_CONCURRENCY_LIMIT)
+
+
 @asynccontextmanager
 async def session_scope() -> AsyncIterator[AsyncSession]:
-    """A short independent session per unit of work."""
-    session = SessionMaker()
-    try:
-        yield session
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
-    finally:
-        await session.close()
+    """A short independent session per unit of work with duration monitoring."""
+    async with _db_semaphore:
+        start_time = time.monotonic()
+        session = SessionMaker()
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            duration = time.monotonic() - start_time
+            if duration > LONG_TRANSACTION_THRESHOLD_S:
+                log.warning(
+                    "Long-running DB transaction detected: %.2fs (threshold: %.1fs)",
+                    duration,
+                    LONG_TRANSACTION_THRESHOLD_S,
+                )
+            await session.close()
 
 
 async def init_db() -> None:
