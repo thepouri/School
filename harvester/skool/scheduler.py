@@ -197,7 +197,7 @@ def build_default_jobs(
         ScheduledJob(
             name="refresh",
             cron="0 2 */3 * *",
-            description="3-day group metrics refresh (stale groups re-fetch & time-series snapshots)",
+            description="3-day metrics refresh (stale groups & users re-fetch & time-series snapshots)",
             command=[
                 py,
                 "-m",
@@ -206,7 +206,6 @@ def build_default_jobs(
                 "refresh",
                 "--refresh-days",
                 refresh_days_str,
-                "--no-users",
             ],
         ),
         ScheduledJob(
@@ -396,7 +395,6 @@ class HarvesterScheduler:
                 str(detail_conc),
                 "--min-delay",
                 f"{delay_s:.3f}",
-                "--no-users",
             ]
         elif mode == "discovery":
             target_mode = "browse" if disc_mode == "quick" else disc_mode

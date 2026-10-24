@@ -100,7 +100,7 @@ class TestSchedulerJobs(unittest.TestCase):
         self.assertIn("refresh", refresh.command)
         self.assertIn("--refresh-days", refresh.command)
         self.assertIn("3", refresh.command)
-        self.assertIn("--no-users", refresh.command)
+        self.assertNotIn("--no-users", refresh.command)
 
         discovery = next(j for j in jobs if j.name == "discovery")
         self.assertEqual(discovery.cron, "0 3 * * 0")
