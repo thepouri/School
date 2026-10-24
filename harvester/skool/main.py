@@ -72,9 +72,21 @@ def build_parser() -> argparse.ArgumentParser:
             "audit",
             "repair",
             "run-all",
+            "import-backup",
             "all",
         ),
         default="all",
+    )
+    parser.add_argument(
+        "--backup-path",
+        type=str,
+        default=None,
+        help="path to .backup / .tar archive for import-backup mode",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="simulate without writing changes to the database",
     )
     parser.add_argument(
         "--missing-owners-batch",
@@ -312,6 +324,21 @@ async def run(args: argparse.Namespace) -> None:
     elif args.init_db:
         await init_db()
         log.info("Schema and tables ready")
+        await dispose_db()
+        return
+
+    # ─── Backup Importer Mode ───
+    if args.mode == "import-backup":
+        if not args.backup_path:
+            log.error("Error: --backup-path is required when --mode import-backup is selected.")
+            await dispose_db()
+            return
+        from .backup_importer import import_backup_users
+        log.info("=== Starting Backup User Importer ===")
+        await import_backup_users(
+            backup_path=args.backup_path,
+            dry_run=args.dry_run,
+        )
         await dispose_db()
         return
 

@@ -17,6 +17,9 @@ dist/
 build/
 *.egg-info/
 analysis_out/
+data/
+*.backup
+*.tar
 
 # Python Cache & Artifacts
 __pycache__/

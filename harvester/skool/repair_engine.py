@@ -78,7 +78,7 @@ class RepairEngine:
         q4 = await session.execute(
             text("""
                 SELECT count(*) FROM skool.users
-                WHERE profile_status IN ('pending', 'stub', 'partial', 'failed')
+                WHERE (profile_status IN ('pending', 'stub', 'partial', 'failed') OR groups_fetched = FALSE)
                   AND profile_attempts < 6
             """)
         )
@@ -202,16 +202,16 @@ class RepairEngine:
             if enqueued:
                 stats["groups_enqueued"] += 1
 
-        # 5. Re-enqueue stub users
+        # 5. Re-enqueue stub and incomplete users
         stub_users_res = await session.execute(
             text("""
                 SELECT id, name FROM skool.users
-                WHERE profile_status IN ('pending', 'stub', 'partial', 'failed')
+                WHERE (profile_status IN ('pending', 'stub', 'partial', 'failed') OR groups_fetched = FALSE)
                   AND profile_attempts < 6
                   AND name IS NOT NULL
                 LIMIT :limit
             """),
-            {"limit": max_enqueue // 2},
+            {"limit": max_enqueue},
         )
         for uid, uname in stub_users_res.all():
             enqueued = await repo.enqueue_task(
